@@ -2,7 +2,7 @@ import csv
 import time
 from linkup import LinkupClient
 
-client = LinkupClient(api_key="618ccb05-0186-4e66-9226-208943cd0126")
+client = LinkupClient(api_key="145dc21e-f3e0-4a29-8cae-0c43bf14c217")
 
 # Read company names from CSV
 csv_file = "Scrapping job offer - thetruckersreport.com.csv"
