@@ -15,8 +15,8 @@ with open(csv_file, "r", encoding="utf-8") as f:
         if name:
             companies.add(name)
 
-companies = sorted(companies)
-print(f"Found {len(companies)} unique companies.\n")
+companies = sorted(companies)[:10]  # Limit to first 10 companies
+print(f"Processing {len(companies)} companies.\n")
 
 # Output CSV
 output_file = "company_domains.csv"
