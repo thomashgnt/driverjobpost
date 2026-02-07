@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scrapers.scrape_job import scrape_job
 from scrapers.find_domain import find_company_domain
 from scrapers.find_decision_makers import find_decision_makers
+from scrapers.find_linkedin import find_linkedin_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,7 @@ CSV_FIELDS = [
     "Decision Maker Name",
     "Decision Maker Title",
     "Category",
+    "LinkedIn",
 ]
 
 
@@ -97,6 +99,7 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                     "Decision Maker Name": dm.name,
                     "Decision Maker Title": dm.title,
                     "Category": dm.category,
+                    "LinkedIn": dm.linkedin or "",
                 })
         else:
             writer.writerow({
@@ -108,6 +111,7 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                 "Decision Maker Name": "",
                 "Decision Maker Title": "",
                 "Category": "",
+                "LinkedIn": "",
             })
 
 
@@ -130,7 +134,6 @@ def process_one_url(url: str, session: requests.Session, output_path: str) -> No
     print("  STEP 3: Finding decision makers…")
     makers = find_decision_makers(job.company_name, domain, session=session)
     if makers:
-        # Group by category for display
         by_cat: dict[str, list] = {}
         for dm in makers:
             by_cat.setdefault(dm.category, []).append(dm)
@@ -140,6 +143,19 @@ def process_one_url(url: str, session: requests.Session, output_path: str) -> No
                 print(f"      - {dm.name} — {dm.title}")
     else:
         print("    No decision makers found.")
+
+    # -- Step 4: Find LinkedIn profiles --
+    if makers:
+        print("  STEP 4: Finding LinkedIn profiles…")
+        for dm in makers:
+            linkedin = find_linkedin_url(
+                dm.name, dm.title, job.company_name, session=session,
+            )
+            dm.linkedin = linkedin or ""
+            if linkedin:
+                print(f"    {dm.name} → {linkedin}")
+            else:
+                print(f"    {dm.name} → not found")
 
     # -- Save immediately --
     _append_results(output_path, url, job.title, job.company_name,

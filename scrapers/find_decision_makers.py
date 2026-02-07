@@ -19,8 +19,9 @@ log = logging.getLogger(__name__)
 class DecisionMaker:
     name: str
     title: str
-    category: str  # "Owners / Boss", "Hiring", or "Operations & Fleet Management"
-    source: str    # the query that found this person
+    category: str       # "Owners / Boss", "Hiring", or "Operations & Fleet Management"
+    source: str         # the query that found this person
+    linkedin: str = ""  # LinkedIn profile URL (filled by pipeline step 4)
 
 
 # 3 categories with their keyword matchers (lowercase substrings).
