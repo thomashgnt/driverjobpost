@@ -56,6 +56,7 @@ CSV_FIELDS = [
     "Company Website",
     "Decision Maker Name",
     "Decision Maker Title",
+    "Category",
 ]
 
 
@@ -95,6 +96,7 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                     "Company Website": website,
                     "Decision Maker Name": dm.name,
                     "Decision Maker Title": dm.title,
+                    "Category": dm.category,
                 })
         else:
             writer.writerow({
@@ -105,6 +107,7 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                 "Company Website": website,
                 "Decision Maker Name": "",
                 "Decision Maker Title": "",
+                "Category": "",
             })
 
 
@@ -127,8 +130,14 @@ def process_one_url(url: str, session: requests.Session, output_path: str) -> No
     print("  STEP 3: Finding decision makers…")
     makers = find_decision_makers(job.company_name, domain, session=session)
     if makers:
-        for i, dm in enumerate(makers, 1):
-            print(f"    {i}. {dm.name} — {dm.title}")
+        # Group by category for display
+        by_cat: dict[str, list] = {}
+        for dm in makers:
+            by_cat.setdefault(dm.category, []).append(dm)
+        for cat, people in by_cat.items():
+            print(f"    [{cat}]")
+            for dm in people:
+                print(f"      - {dm.name} — {dm.title}")
     else:
         print("    No decision makers found.")
 

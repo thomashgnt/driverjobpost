@@ -19,23 +19,28 @@ log = logging.getLogger(__name__)
 class DecisionMaker:
     name: str
     title: str
-    source: str  # the query that found this person
+    category: str  # "Owners / Boss", "Hiring", or "Operations & Fleet Management"
+    source: str    # the query that found this person
 
 
-# Titles we want to keep — matched as lowercase substrings
-WANTED_TITLE_KEYWORDS = [
-    # C-suite / owners
-    "ceo", "chief", "owner", "founder", "president", "partner",
-    # VP level
-    "vp", "vice president",
-    # Directors / Heads
-    "director", "head of",
-    # Operations & fleet
-    "operations", "fleet", "transportation", "logistics", "dispatch", "safety",
-    # Recruiting / HR
-    "hiring", "recruiter", "recruiting", "talent", "human resources", "hr ",
-    # Manager level (broad)
-    "manager",
+# 3 categories with their keyword matchers (lowercase substrings).
+# Order matters:
+#   1. Hiring first   → catches "HR Director", "Hiring Manager" before generic "director"/"manager"
+#   2. Owners / Boss  → catches "VP Operations", "Director of Transportation" (senior roles)
+#   3. Ops & Fleet    → catches remaining "Fleet Manager", "Safety Manager" (non-VP/Director)
+CATEGORIES: list[tuple[str, list[str]]] = [
+    ("Hiring", [
+        "hiring", "recruiter", "recruiting", "talent", "human resources",
+        "hr ",
+    ]),
+    ("Owners / Boss", [
+        "ceo", "chief", "owner", "founder", "president", "partner",
+        "vp", "vice president", "director", "head of",
+    ]),
+    ("Operations & Fleet Management", [
+        "operations", "fleet", "transportation", "logistics", "dispatch",
+        "safety", "manager",
+    ]),
 ]
 
 PEOPLE_SCHEMA = json.dumps({
@@ -73,10 +78,13 @@ PEOPLE_SCHEMA = json.dumps({
 })
 
 
-def _is_relevant_title(title: str) -> bool:
-    """Return True if the title matches one of the wanted keywords."""
+def _categorize_title(title: str) -> str | None:
+    """Return the category for this title, or None if irrelevant."""
     lower = title.lower()
-    return any(kw in lower for kw in WANTED_TITLE_KEYWORDS)
+    for category, keywords in CATEGORIES:
+        if any(kw in lower for kw in keywords):
+            return category
+    return None
 
 
 def find_decision_makers(
@@ -109,13 +117,15 @@ def find_decision_makers(
                 title = person.get("title", "").strip()
                 if not name or name.lower() in ("unknown", "n/a", ""):
                     continue
-                if not title or not _is_relevant_title(title):
+                category = _categorize_title(title) if title else None
+                if not category:
                     log.debug("Skipping '%s' with irrelevant title '%s'", name, title)
                     continue
                 if name not in all_people:
                     all_people[name] = DecisionMaker(
                         name=name,
                         title=title,
+                        category=category,
                         source=query,
                     )
 
