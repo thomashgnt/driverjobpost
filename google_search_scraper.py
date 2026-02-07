@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Google Search Scraper - Find company websites from the truckers report CSV.
+Google Search Scraper (Linkup API) - Find company websites from the truckers report CSV.
 
-Reads company names from the CSV file and searches Google to find their websites.
-Results are saved to a new CSV file with the company name and discovered website URL.
+Reads company names from the CSV file and uses the Linkup search API
+to find their official websites. Results are saved to a new CSV file.
 """
 
 import csv
-import re
 import time
-import random
 import logging
 import argparse
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import requests
 
@@ -22,17 +20,10 @@ import requests
 INPUT_CSV = "Scrapping job offer - thetruckersreport.com.csv"
 OUTPUT_CSV = "company_websites.csv"
 
-GOOGLE_SEARCH_URL = "https://www.google.com/search"
+LINKUP_API_URL = "https://api.linkup.so/v1/search"
+LINKUP_API_KEY = "618ccb05-0186-4e66-9226-208943cd0126"
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
-
-# Domains to skip (these are aggregators / job boards, not company sites)
+# Domains to skip (aggregators / job boards, not company sites)
 SKIP_DOMAINS = {
     "thetruckersreport.com",
     "indeed.com",
@@ -71,10 +62,6 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _random_ua() -> str:
-    return random.choice(USER_AGENTS)
-
-
 def _is_skip_domain(url: str) -> bool:
     """Return True if the URL belongs to a domain we want to ignore."""
     try:
@@ -87,76 +74,52 @@ def _is_skip_domain(url: str) -> bool:
     return False
 
 
-def _extract_urls_from_html(html: str) -> list[str]:
+def search_linkup(query: str, session: requests.Session, api_key: str, retries: int = 3) -> str | None:
     """
-    Extract result URLs from Google search HTML without BeautifulSoup.
-    Google embeds result links in <a href="/url?q=ACTUAL_URL&..."> tags.
-    """
-    urls: list[str] = []
-
-    # Pattern 1: /url?q= redirects (standard Google results)
-    for match in re.finditer(r'/url\?q=(https?://[^&"]+)', html):
-        url = match.group(1)
-        if not _is_skip_domain(url):
-            urls.append(url)
-
-    # Pattern 2: Direct href links starting with http (fallback)
-    if not urls:
-        for match in re.finditer(r'href="(https?://(?!www\.google)[^"]+)"', html):
-            url = match.group(1)
-            if not _is_skip_domain(url):
-                urls.append(url)
-
-    # Deduplicate while keeping order
-    seen = set()
-    unique: list[str] = []
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            unique.append(u)
-    return unique
-
-
-def search_google(query: str, session: requests.Session, retries: int = 3) -> str | None:
-    """
-    Search Google for *query* and return the first non-skipped result URL.
+    Search via Linkup API and return the first non-skipped result URL.
     Returns None if nothing useful was found.
     """
-    params = {
-        "q": query,
-        "num": "10",
-        "hl": "en",
-    }
     headers = {
-        "User-Agent": _random_ua(),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.google.com/",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "q": query,
+        "depth": "standard",
+        "outputType": "searchResults",
+        "maxResults": 5,
     }
 
     for attempt in range(retries):
         try:
-            resp = session.get(
-                GOOGLE_SEARCH_URL,
-                params=params,
+            resp = session.post(
+                LINKUP_API_URL,
+                json=payload,
                 headers=headers,
-                timeout=15,
+                timeout=30,
             )
 
             if resp.status_code == 429:
-                wait = 30 * (attempt + 1)
+                wait = 10 * (attempt + 1)
                 log.warning("Rate-limited (429). Waiting %ds before retry…", wait)
                 time.sleep(wait)
                 continue
 
             resp.raise_for_status()
+            data = resp.json()
 
-            urls = _extract_urls_from_html(resp.text)
-            return urls[0] if urls else None
+            # Extract results — Linkup returns { "results": [ { "name", "url", "content" }, ... ] }
+            results = data.get("results", [])
+            for result in results:
+                url = result.get("url", "")
+                if url and not _is_skip_domain(url):
+                    return url
+
+            return None
 
         except requests.RequestException as exc:
             log.warning("Request error (attempt %d/%d): %s", attempt + 1, retries, exc)
-            time.sleep(5 * (attempt + 1))
+            time.sleep(3 * (attempt + 1))
 
     return None
 
@@ -177,13 +140,24 @@ def read_company_names(path: str) -> list[str]:
     return names
 
 
+def _write_output(path: str, results: list[dict], ordered_companies: list[str]) -> None:
+    """Write results to CSV, maintaining the original company order."""
+    lookup = {r["Company Name"]: r for r in results}
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["Company Name", "Website"])
+        writer.writeheader()
+        for name in ordered_companies:
+            if name in lookup:
+                writer.writerow(lookup[name])
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Find company websites via Google Search."
+        description="Find company websites via Linkup Search API."
     )
     parser.add_argument(
         "-i", "--input",
@@ -196,16 +170,15 @@ def main() -> None:
         help=f"Output CSV file (default: {OUTPUT_CSV})",
     )
     parser.add_argument(
-        "--delay-min",
-        type=float,
-        default=4.0,
-        help="Minimum delay between requests in seconds (default: 4)",
+        "--api-key",
+        default=LINKUP_API_KEY,
+        help="Linkup API key (default: built-in key)",
     )
     parser.add_argument(
-        "--delay-max",
+        "--delay",
         type=float,
-        default=8.0,
-        help="Maximum delay between requests in seconds (default: 8)",
+        default=1.0,
+        help="Delay between requests in seconds (default: 1)",
     )
     parser.add_argument(
         "--resume",
@@ -246,7 +219,7 @@ def main() -> None:
         query = f"{company} trucking company official website"
         log.info("[%d/%d] Searching: %s", i, len(remaining), company)
 
-        website = search_google(query, session)
+        website = search_linkup(query, session, args.api_key)
 
         if website:
             log.info("  -> %s", website)
@@ -261,23 +234,11 @@ def main() -> None:
         # Write after every lookup so progress is not lost
         _write_output(args.output, results, companies)
 
-        # Random delay to avoid rate-limiting
+        # Small delay between requests
         if i < len(remaining):
-            delay = random.uniform(args.delay_min, args.delay_max)
-            time.sleep(delay)
+            time.sleep(args.delay)
 
     log.info("Done! Results written to %s", args.output)
-
-
-def _write_output(path: str, results: list[dict], ordered_companies: list[str]) -> None:
-    """Write results to CSV, maintaining the original company order."""
-    lookup = {r["Company Name"]: r for r in results}
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["Company Name", "Website"])
-        writer.writeheader()
-        for name in ordered_companies:
-            if name in lookup:
-                writer.writerow(lookup[name])
 
 
 if __name__ == "__main__":
