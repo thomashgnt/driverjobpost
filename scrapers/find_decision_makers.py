@@ -278,8 +278,6 @@ def _priority_2_company_website(
                 people = _extract_people_from_markdown(markdown)
                 for name, title in people:
                     _add_person(all_people, name, title, "Company Website")
-                if people:
-                    break
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +286,8 @@ def _priority_2_company_website(
 
 LINKEDIN_TITLE_QUERIES = [
     "CEO OR owner OR founder",
-    "hiring manager OR recruiter",
-    "fleet manager OR operations",
+    "hiring manager OR recruiter OR HR director OR talent acquisition",
+    "fleet manager OR operations OR safety",
 ]
 
 
@@ -376,20 +374,27 @@ CATEGORY_QUERIES = {
 }
 
 
+def _count_valid_in_category(all_people: dict, category: str) -> int:
+    """Count valid (with LinkedIn) people in a specific category."""
+    return sum(1 for p in all_people.values() if p.category == category and p.linkedin)
+
+
 def _priority_4_web_search(
     company_name: str,
     company_domain: str | None,
     all_people: dict,
     session: requests.Session,
 ) -> None:
-    """Direct web search for decision makers by title."""
-    # Skip if we already have 3+ valid contacts
-    if _count_valid(all_people) >= 3:
-        log.info("Priority 4: Skipping — already have %d valid contacts", _count_valid(all_people))
-        return
-
+    """Direct web search for decision makers by title — per category."""
     domain_hint = f"site:{company_domain}" if company_domain else ""
     for category, title_terms in CATEGORY_QUERIES.items():
+        # Skip this category if we already have 1+ valid person in it
+        cat_valid = _count_valid_in_category(all_people, category)
+        if cat_valid >= 1:
+            log.info("Priority 4: Skipping '%s' — already have %d valid", category, cat_valid)
+            continue
+
+        log.info("Priority 4: Searching '%s' (0 valid in this category)", category)
         query = f'"{company_name}" {title_terms} {domain_hint}'.strip()
         data = search_structured(query, PEOPLE_SCHEMA, session=session, depth="deep")
         if data and "people" in data:
