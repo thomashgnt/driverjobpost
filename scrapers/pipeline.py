@@ -17,10 +17,11 @@ One command to rule them all:
     python3 scrapers/pipeline.py -f urls.txt --resume
 
 This will, for each URL:
-  1. Scrape the job posting (title, company, description)
+  1. Scrape the job posting (title, company, description, contact)
   2. Find the company's official website
-  3. Find decision makers (CEO, VP, hiring managers)
-  4. Save everything to a CSV
+  3. Find decision makers (5-priority deep search)
+  4. Find LinkedIn profiles (skip if already found in step 3)
+  5. Save everything to a CSV
 """
 
 import sys
@@ -58,7 +59,10 @@ CSV_FIELDS = [
     "Decision Maker Name",
     "Decision Maker Title",
     "Category",
+    "Mentioned in Job Posting",
+    "Source",
     "LinkedIn",
+    "Status",
 ]
 
 
@@ -99,7 +103,10 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                     "Decision Maker Name": dm.name,
                     "Decision Maker Title": dm.title,
                     "Category": dm.category,
+                    "Mentioned in Job Posting": "Yes" if dm.mentioned_in_job_posting else "No",
+                    "Source": dm.source,
                     "LinkedIn": dm.linkedin or "",
+                    "Status": "Valid" if dm.linkedin else "Invalid",
                 })
         else:
             writer.writerow({
@@ -111,7 +118,10 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                 "Decision Maker Name": "",
                 "Decision Maker Title": "",
                 "Category": "",
+                "Mentioned in Job Posting": "",
+                "Source": "",
                 "LinkedIn": "",
+                "Status": "",
             })
 
 
@@ -124,30 +134,32 @@ def process_one_url(url: str, session: requests.Session, output_path: str) -> No
     print(f"    Job Title : {job.title}")
     print(f"    Company   : {job.company_name}")
     print(f"    Desc      : {job.description[:120]}…")
+    if job.contact_name:
+        print(f"    Contact   : {job.contact_name} ({job.contact_email or 'no email'})")
 
     # -- Step 2: Find company website --
     print("  STEP 2: Finding company website…")
     domain = find_company_domain(job.company_name, session=session)
     print(f"    Website   : {domain or 'NOT FOUND'}")
 
-    # -- Step 3: Find decision makers --
-    print("  STEP 3: Finding decision makers…")
-    makers = find_decision_makers(job.company_name, domain, session=session)
-    if makers:
-        by_cat: dict[str, list] = {}
-        for dm in makers:
-            by_cat.setdefault(dm.category, []).append(dm)
-        for cat, people in by_cat.items():
-            print(f"    [{cat}]")
-            for dm in people:
-                print(f"      - {dm.name} — {dm.title}")
-    else:
-        print("    No decision makers found.")
+    # -- Step 3: Find decision makers (5-priority deep search) --
+    print("  STEP 3: Finding decision makers (deep search)…")
+    makers = find_decision_makers(
+        company_name=job.company_name,
+        company_domain=domain,
+        job_description=job.description,
+        contact_name=job.contact_name,
+        contact_email=job.contact_email,
+        session=session,
+    )
 
-    # -- Step 4: Find LinkedIn profiles --
+    # -- Step 4: Find LinkedIn profiles (skip if already found) --
     if makers:
         print("  STEP 4: Finding LinkedIn profiles…")
         for dm in makers:
+            if dm.linkedin:
+                print(f"    {dm.name} → {dm.linkedin} (already found)")
+                continue
             linkedin = find_linkedin_url(
                 dm.name, dm.title, job.company_name, session=session,
             )
@@ -156,6 +168,25 @@ def process_one_url(url: str, session: requests.Session, output_path: str) -> No
                 print(f"    {dm.name} → {linkedin}")
             else:
                 print(f"    {dm.name} → not found")
+
+    # -- Step 5: Display results with validation --
+    if makers:
+        print("\n  RESULTS:")
+        by_cat: dict[str, list] = {}
+        for dm in makers:
+            by_cat.setdefault(dm.category, []).append(dm)
+        for cat, people in by_cat.items():
+            print(f"    [{cat}]")
+            for dm in people:
+                status = "Valid" if dm.linkedin else "Invalid"
+                tag = " [FROM JOB POSTING]" if dm.mentioned_in_job_posting else ""
+                print(f"      [{status}] {dm.name} — {dm.title} ({dm.source}){tag}")
+                if dm.linkedin:
+                    print(f"              {dm.linkedin}")
+        valid = sum(1 for dm in makers if dm.linkedin)
+        print(f"\n    Total: {len(makers)} decision makers ({valid} valid, {len(makers) - valid} invalid)")
+    else:
+        print("    No decision makers found.")
 
     # -- Save immediately --
     _append_results(output_path, url, job.title, job.company_name,

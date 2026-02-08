@@ -1,5 +1,6 @@
 """
-Step 1: Scrape a job posting URL to extract title, company name, and description.
+Step 1: Scrape a job posting URL to extract title, company name, description,
+and contact person mentioned in the posting.
 
 Strategy A: Linkup /fetch → parse the markdown
 Strategy B: Linkup structured search (fallback)
@@ -24,6 +25,8 @@ class JobInfo:
     company_name: str
     description: str
     source_url: str
+    contact_name: str = ""
+    contact_email: str = ""
 
 
 # JSON schema for structured extraction from Linkup
@@ -46,6 +49,76 @@ JOB_SCHEMA = json.dumps({
     "required": ["jobTitle", "companyName", "jobDescription"],
 })
 
+# ---------------------------------------------------------------------------
+# Contact extraction from job description
+# ---------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r'[\w.-]+@[\w.-]+\.\w{2,}')
+GENERIC_EMAIL_PREFIXES = {
+    "info", "careers", "jobs", "hr", "noreply", "apply", "applications",
+    "recruiting", "hiring", "support", "admin", "contact", "office",
+}
+
+CONTACT_PATTERNS = [
+    re.compile(r'[Cc]ontact\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Aa]pply\s+(?:with|to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Ss]end\s+(?:your\s+)?(?:resume|CV|application)\s+to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Rr]ecruiter[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Hh]iring\s+[Mm]anager[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Pp]osted\s+by[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Aa]sk\s+for\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Rr]each\s+(?:out\s+)?to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Cc]all\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Ee]mail\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+]
+
+# Words that look like names but aren't people
+NAME_BLOCKLIST = {
+    "our team", "the company", "the office", "our office", "the driver",
+    "our driver", "the recruiter", "your resume", "your cv",
+}
+
+
+def _extract_contact_info(text: str) -> tuple[str, str]:
+    """
+    Extract a contact person name and email from job description text.
+    Returns (name, email). Either or both may be empty strings.
+    """
+    if not text:
+        return "", ""
+
+    # --- Email extraction ---
+    email = ""
+    for match in EMAIL_RE.finditer(text):
+        candidate = match.group(0).lower()
+        prefix = candidate.split("@")[0]
+        if prefix not in GENERIC_EMAIL_PREFIXES:
+            email = match.group(0)
+            break
+
+    # --- Name extraction from patterns ---
+    name = ""
+    for pattern in CONTACT_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate.lower() not in NAME_BLOCKLIST and len(candidate.split()) >= 2:
+                name = candidate
+                break
+
+    # --- If we have an email but no name, try to derive name from email ---
+    if email and not name:
+        prefix = email.split("@")[0]
+        parts = re.split(r'[._-]', prefix)
+        if len(parts) >= 2 and all(p.isalpha() for p in parts):
+            name = " ".join(p.capitalize() for p in parts)
+
+    return name, email
+
+
+# ---------------------------------------------------------------------------
+# Markdown parsing
+# ---------------------------------------------------------------------------
 
 def _extract_from_markdown(markdown: str, url: str) -> JobInfo | None:
     """
@@ -103,12 +176,18 @@ def _extract_from_markdown(markdown: str, url: str) -> JobInfo | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
     """
     Main entry point: extract job info from a URL.
     Tries Linkup /fetch first, then falls back to structured search.
+    Also extracts contact person info from the description.
     """
     sess = session or requests.Session()
+    raw_text = ""
 
     # --- Strategy A: Linkup /fetch ---
     log.info("Fetching job page via Linkup /fetch: %s", url)
@@ -116,8 +195,12 @@ def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
 
     if markdown and len(markdown) > 100:
         log.info("Got %d chars of markdown content", len(markdown))
+        raw_text = markdown
         job = _extract_from_markdown(markdown, url)
         if job and job.company_name != "Unknown Company":
+            name, email = _extract_contact_info(raw_text)
+            job.contact_name = name
+            job.contact_email = email
             return job
         log.warning("Could not parse company from markdown, trying structured search…")
 
@@ -127,11 +210,16 @@ def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
     data = search_structured(query, JOB_SCHEMA, session=sess, depth="deep")
 
     if data:
+        desc = data.get("jobDescription", "No description")[:2000]
+        raw_text = raw_text or desc
+        name, email = _extract_contact_info(raw_text)
         return JobInfo(
             title=data.get("jobTitle", "Unknown Title"),
             company_name=data.get("companyName", "Unknown Company"),
-            description=data.get("jobDescription", "No description")[:2000],
+            description=desc,
             source_url=url,
+            contact_name=name,
+            contact_email=email,
         )
 
     # --- Strategy C: extract from URL ---
