@@ -80,11 +80,32 @@ def _load_already_done(path: str) -> set[str]:
 
 
 def _ensure_csv_header(path: str) -> None:
-    """Create the CSV with header if it doesn't exist yet."""
+    """Create or migrate the CSV header if columns changed."""
     if not os.path.exists(path):
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             writer.writeheader()
+        return
+
+    # Check if existing header matches current fields
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        existing_header = next(reader, None)
+
+    if existing_header != CSV_FIELDS:
+        log.warning("CSV columns changed — migrating %s to new format…", path)
+        # Read all existing rows
+        rows = []
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+        # Rewrite with new header (old rows keep their values, new columns get "")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
 
 
 def _append_results(path: str, url: str, job_title: str, company: str,
