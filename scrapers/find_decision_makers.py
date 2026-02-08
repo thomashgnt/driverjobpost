@@ -302,6 +302,38 @@ def _parse_linkedin_result(name_field: str) -> tuple[str, str]:
     return name, title
 
 
+def _company_in_result(company_name: str, result_text: str, person_name: str) -> bool:
+    """
+    Check that a LinkedIn result is about someone who works at this company,
+    not just someone whose personal name matches the company name.
+
+    Removes the person's name parts from the result text, then checks
+    if the company name still appears.
+    """
+    text = result_text.lower()
+    company_lower = company_name.lower().strip()
+
+    # Remove person's name parts from the text
+    for part in person_name.lower().split():
+        if len(part) > 1:  # skip initials like "M"
+            text = text.replace(part, " ")
+
+    # Clean up extra spaces
+    text = re.sub(r'\s+', ' ', text)
+
+    # Check if full company name still appears
+    if company_lower in text:
+        return True
+
+    # Also try without punctuation (e.g. "D.M. Bowman" → "dm bowman")
+    company_clean = re.sub(r'[^\w\s]', '', company_lower)
+    text_clean = re.sub(r'[^\w\s]', '', text)
+    if company_clean in text_clean:
+        return True
+
+    return False
+
+
 def _priority_3_linkedin(
     company_name: str,
     all_people: dict,
@@ -316,11 +348,21 @@ def _priority_3_linkedin(
         for result in data.get("results", []):
             url = result.get("url", "")
             name_field = result.get("name", "")
+            content = result.get("content", "")
             if "linkedin.com/in/" not in url.lower():
                 continue
             name, title = _parse_linkedin_result(name_field)
-            if name and len(name.split()) >= 2:
-                _add_person(all_people, name, title or "Unknown Role", "LinkedIn", linkedin=url)
+            if not name or len(name.split()) < 2:
+                continue
+
+            # Guard: verify the company name appears in the result
+            # independently of the person's name (avoid last-name matches)
+            full_text = f"{name_field} {content}"
+            if not _company_in_result(company_name, full_text, name):
+                log.info("Skipping '%s' — company '%s' not confirmed in LinkedIn result", name, company_name)
+                continue
+
+            _add_person(all_people, name, title or "Unknown Role", "LinkedIn", linkedin=url)
 
 
 # ---------------------------------------------------------------------------
