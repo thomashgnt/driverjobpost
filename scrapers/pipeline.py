@@ -16,12 +16,15 @@ One command to rule them all:
     # Resume after interruption
     python3 scrapers/pipeline.py -f urls.txt --resume
 
+    # Push results to Clay (2 tables)
+    python3 scrapers/pipeline.py --clay-jobs "WEBHOOK_URL" --clay-contacts "WEBHOOK_URL" "url1"
+
 This will, for each URL:
   1. Scrape the job posting (title, company, description, contact)
   2. Find the company's official website
   3. Find decision makers (5-priority deep search)
   4. Find LinkedIn profiles (skip if already found in step 3)
-  5. Save everything to a CSV
+  5. Save everything to a CSV + push to Clay (if configured)
 """
 
 import sys
@@ -66,6 +69,30 @@ CSV_FIELDS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Clay webhook helper
+# ---------------------------------------------------------------------------
+
+def _push_to_clay(webhook_url: str, data: dict, session: requests.Session) -> bool:
+    """POST JSON to a Clay webhook. Retry 2x on failure."""
+    for attempt in range(3):
+        try:
+            resp = session.post(webhook_url, json=data, timeout=15)
+            resp.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            if attempt < 2:
+                time.sleep(2)
+            else:
+                log.error("Clay push failed: %s", exc)
+                return False
+    return False
+
+
+# ---------------------------------------------------------------------------
+# CSV helpers
+# ---------------------------------------------------------------------------
+
 def _load_already_done(path: str) -> set[str]:
     """Load URLs already processed from an existing output CSV."""
     done: set[str] = set()
@@ -94,13 +121,11 @@ def _ensure_csv_header(path: str) -> None:
 
     if existing_header != CSV_FIELDS:
         log.warning("CSV columns changed — migrating %s to new format…", path)
-        # Read all existing rows
         rows = []
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 rows.append(row)
-        # Rewrite with new header (old rows keep their values, new columns get "")
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
             writer.writeheader()
@@ -146,8 +171,19 @@ def _append_results(path: str, url: str, job_title: str, company: str,
             })
 
 
-def process_one_url(url: str, session: requests.Session, output_path: str) -> None:
-    """Run the full pipeline for a single job URL."""
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+def process_one_url(
+    url: str,
+    session: requests.Session,
+    output_path: str,
+    clay_jobs_url: str | None = None,
+    clay_contacts_url: str | None = None,
+) -> dict:
+    """Run the full pipeline for a single job URL. Returns Clay push counts."""
+    clay_counts = {"jobs": 0, "contacts": 0}
 
     # -- Step 1: Scrape the job posting --
     print("\n  STEP 1: Scraping job posting…")
@@ -209,9 +245,49 @@ def process_one_url(url: str, session: requests.Session, output_path: str) -> No
     else:
         print("    No decision makers found.")
 
-    # -- Save immediately --
+    # -- Save to CSV --
     _append_results(output_path, url, job.title, job.company_name,
                     domain or "", makers)
+
+    # -- Push to Clay --
+    if clay_jobs_url:
+        print("  CLAY: Pushing job offer…")
+        valid_count = sum(1 for dm in makers if dm.linkedin) if makers else 0
+        job_data = {
+            "Job URL": url,
+            "Job Title": job.title,
+            "Company Name": job.company_name,
+            "Company Website": domain or "",
+            "Contact in Posting": job.contact_name or "",
+            "Decision Makers Found": len(makers) if makers else 0,
+            "Valid Contacts": valid_count,
+        }
+        if _push_to_clay(clay_jobs_url, job_data, session):
+            clay_counts["jobs"] = 1
+            print("    Job offer pushed to Clay")
+        else:
+            print("    Failed to push job offer to Clay")
+
+    if clay_contacts_url and makers:
+        print("  CLAY: Pushing contacts…")
+        for dm in makers:
+            contact_data = {
+                "Company Name": job.company_name,
+                "Company Website": domain or "",
+                "Decision Maker Name": dm.name,
+                "Decision Maker Title": dm.title,
+                "Category": dm.category,
+                "LinkedIn": dm.linkedin or "",
+                "Status": "Valid" if dm.linkedin else "Invalid",
+                "Source": dm.source,
+                "Mentioned in Job Posting": "Yes" if dm.mentioned_in_job_posting else "No",
+                "Job URL": url,
+            }
+            if _push_to_clay(clay_contacts_url, contact_data, session):
+                clay_counts["contacts"] += 1
+        print(f"    {clay_counts['contacts']}/{len(makers)} contacts pushed to Clay")
+
+    return clay_counts
 
 
 def collect_urls(args) -> list[str]:
@@ -267,6 +343,14 @@ def main() -> None:
         action="store_true",
         help="Skip URLs already present in the output CSV",
     )
+    parser.add_argument(
+        "--clay-jobs",
+        help="Clay webhook URL for Job Offers table",
+    )
+    parser.add_argument(
+        "--clay-contacts",
+        help="Clay webhook URL for Contacts table",
+    )
     args = parser.parse_args()
 
     # Collect all URLs
@@ -286,8 +370,12 @@ def main() -> None:
 
     total = len(urls)
     log.info("Processing %d URL(s)…", total)
+    if args.clay_jobs or args.clay_contacts:
+        log.info("Clay integration enabled")
 
     session = requests.Session()
+    total_clay_jobs = 0
+    total_clay_contacts = 0
 
     for i, url in enumerate(urls, start=1):
         print(f"\n{'=' * 60}")
@@ -295,7 +383,13 @@ def main() -> None:
         print(f"{'=' * 60}")
 
         try:
-            process_one_url(url, session, args.output)
+            counts = process_one_url(
+                url, session, args.output,
+                clay_jobs_url=args.clay_jobs,
+                clay_contacts_url=args.clay_contacts,
+            )
+            total_clay_jobs += counts["jobs"]
+            total_clay_contacts += counts["contacts"]
         except Exception as exc:
             log.error("Failed to process %s: %s", url, exc)
             print(f"  ERROR: {exc} — skipping to next URL")
@@ -306,6 +400,8 @@ def main() -> None:
     print(f"\n{'=' * 60}")
     print(f"  DONE! {total} URL(s) processed.")
     print(f"  Results saved to: {args.output}")
+    if args.clay_jobs or args.clay_contacts:
+        print(f"  Clay: {total_clay_jobs} jobs + {total_clay_contacts} contacts pushed")
     print(f"{'=' * 60}")
 
 
