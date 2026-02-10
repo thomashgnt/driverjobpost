@@ -5,12 +5,16 @@ and contact person mentioned in the posting.
 Strategy A: Linkup /fetch → parse the markdown
 Strategy B: Linkup structured search (fallback)
 Strategy C: Extract company name from URL (last resort)
+
+Special handling for Amazon DSP / Fountain pages where the actual employer
+is the DSP company (e.g. "Next Steps Logistics LLC"), not "Amazon".
 """
 
 import json
 import re
 import logging
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import requests
 
@@ -35,11 +39,16 @@ JOB_SCHEMA = json.dumps({
     "properties": {
         "jobTitle": {
             "type": "string",
-            "description": "The job title from the posting",
+            "description": "The job title from the posting (e.g. Delivery Driver, CDL Truck Driver)",
         },
         "companyName": {
             "type": "string",
-            "description": "The company name that posted the job",
+            "description": (
+                "The actual employer company name. "
+                "IMPORTANT: For Amazon DSP listings, the employer is the Delivery Service Partner "
+                "(the LLC/Inc company like 'Next Steps Logistics LLC'), NOT 'Amazon' or 'Amazon DSP'. "
+                "Look for the company entity with LLC, Inc, Corp, or Ltd suffix."
+            ),
         },
         "jobDescription": {
             "type": "string",
@@ -117,6 +126,121 @@ def _extract_contact_info(text: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Company name cleanup — strip aggregator/platform names
+# ---------------------------------------------------------------------------
+
+# Regex to find entity suffixes (LLC, Inc, Corp...)
+ENTITY_SUFFIX_RE = re.compile(
+    r'\b(LLC|Inc\.?|Corp\.?|Corporation|Ltd\.?|L\.?L\.?C\.?|Incorporated)\b',
+    re.IGNORECASE,
+)
+
+# Suffixes / noise to strip from company names
+PLATFORM_NOISE = [
+    r'\s*[-–—]\s*Amazon\s*DSP\s*$',
+    r'\s*[-–—]\s*Amazon\s*$',
+    r'\s*\(\s*Amazon\s*DSP\s*\)\s*$',
+    r'\s*[-–—]\s*DSP\s*$',
+    r'^\s*Amazon\s*DSP\s*[-–—]\s*',
+]
+PLATFORM_NOISE_RE = [re.compile(p, re.IGNORECASE) for p in PLATFORM_NOISE]
+
+
+def _is_fountain_amazon_dsp(url: str) -> bool:
+    """Check if this URL is a Fountain Amazon DSP job posting."""
+    try:
+        host = urlparse(url).netloc.lower()
+        path = urlparse(url).path.lower()
+    except Exception:
+        return False
+    return "fountain.com" in host and "delivery-service-partner" in path
+
+
+def _clean_company_name(name: str) -> str:
+    """Remove aggregator/platform noise from company name."""
+    cleaned = name.strip()
+    for regex in PLATFORM_NOISE_RE:
+        cleaned = regex.sub("", cleaned).strip()
+    return cleaned if cleaned else name.strip()
+
+
+def _find_entity_in_text(text: str) -> str | None:
+    """
+    Find a company entity name (LLC/Inc/Corp) in text by locating the
+    suffix and walking backwards to grab the preceding capitalized words.
+
+    "Next Steps Logistics LLC" → "Next Steps Logistics LLC"
+    "Bullard Logistics, LLC" → "Bullard Logistics, LLC"
+    """
+    for match in ENTITY_SUFFIX_RE.finditer(text):
+        suffix = match.group(0)
+        before = text[:match.start()].rstrip(", ")
+
+        # Walk backwards through words to find the company name
+        words = before.split()
+        name_parts: list[str] = []
+        for word in reversed(words):
+            clean = word.strip(" -–—|,")
+            if not clean:
+                break
+            # Stop at separators, prices, station codes like "DLN3"
+            if clean[0].isupper() and clean.isalpha():
+                name_parts.insert(0, clean)
+                if len(name_parts) >= 6:
+                    break
+            elif clean in ("&", "of", "and", "the"):
+                name_parts.insert(0, clean)
+            else:
+                break
+
+        if name_parts:
+            # Reconstruct with original comma if present
+            comma = ", " if text[match.start() - 2:match.start()].rstrip() .endswith(",") else " "
+            entity = " ".join(name_parts) + comma + suffix
+            if "amazon" not in entity.lower():
+                return entity
+    return None
+
+
+def _extract_real_company(text: str, raw_company: str) -> str:
+    """
+    For Amazon DSP pages: find the real employer (the LLC/Inc entity).
+
+    Strategy:
+      1. Split raw_company by " - " and find the part with LLC/Inc
+      2. Search raw_company for entity pattern
+      3. Search full text (title + description) for entity pattern
+      4. Fallback: clean the raw name
+
+    Examples:
+        "$18/hr - Delivery Helper - Next Steps Logistics LLC - Amazon DSP"
+        → "Next Steps Logistics LLC"
+
+        "Bullard Logistics, LLC is an Amazon Delivery Service Partner"
+        → "Bullard Logistics, LLC"
+    """
+    # Strategy 1: Split by " - " and find the LLC/Inc part
+    for separator in (" - ", " – ", " — ", " | "):
+        for part in raw_company.split(separator):
+            part = part.strip()
+            if ENTITY_SUFFIX_RE.search(part) and "amazon" not in part.lower():
+                return part
+
+    # Strategy 2: Find entity in raw company name
+    entity = _find_entity_in_text(raw_company)
+    if entity:
+        return entity
+
+    # Strategy 3: Find entity in full text
+    entity = _find_entity_in_text(text)
+    if entity:
+        return entity
+
+    # Strategy 4: Just clean the name
+    return _clean_company_name(raw_company)
+
+
+# ---------------------------------------------------------------------------
 # Markdown parsing
 # ---------------------------------------------------------------------------
 
@@ -167,6 +291,13 @@ def _extract_from_markdown(markdown: str, url: str) -> JobInfo | None:
             company = m.group(1).replace("-", " ").title()
 
     if title or company:
+        # For Amazon DSP / Fountain pages: extract the real employer
+        if _is_fountain_amazon_dsp(url):
+            full_text = f"{title}\n{description}"
+            company = _extract_real_company(full_text, company or title)
+        elif company:
+            company = _clean_company_name(company)
+
         return JobInfo(
             title=title or "Unknown Title",
             company_name=company or "Unknown Company",
@@ -212,10 +343,20 @@ def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
     if data:
         desc = data.get("jobDescription", "No description")[:2000]
         raw_text = raw_text or desc
+        raw_company = data.get("companyName", "Unknown Company")
+        raw_title = data.get("jobTitle", "Unknown Title")
+
+        # Clean up company name (especially for Amazon DSP)
+        if _is_fountain_amazon_dsp(url):
+            full_text = f"{raw_title}\n{raw_company}\n{desc}"
+            company = _extract_real_company(full_text, raw_company)
+        else:
+            company = _clean_company_name(raw_company)
+
         name, email = _extract_contact_info(raw_text)
         return JobInfo(
-            title=data.get("jobTitle", "Unknown Title"),
-            company_name=data.get("companyName", "Unknown Company"),
+            title=raw_title,
+            company_name=company,
             description=desc,
             source_url=url,
             contact_name=name,
