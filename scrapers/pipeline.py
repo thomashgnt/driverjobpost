@@ -32,8 +32,10 @@ import os
 import csv
 import logging
 import argparse
+import re
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 
@@ -56,6 +58,7 @@ OUTPUT_CSV = "pipeline_results.csv"
 CSV_FIELDS = [
     "Timestamp",
     "Job URL",
+    "Job Board",
     "Job Title",
     "Company Name",
     "Company Website",
@@ -67,6 +70,85 @@ CSV_FIELDS = [
     "LinkedIn",
     "Status",
 ]
+
+# ---------------------------------------------------------------------------
+# Job Board name normalization
+# ---------------------------------------------------------------------------
+
+# Known job boards → clean name for email templates
+KNOWN_JOB_BOARDS: dict[str, str] = {
+    "thetruckersreport.com": "The Truckers Report",
+    "fountain.com": "Fountain",
+    "indeed.com": "Indeed",
+    "glassdoor.com": "Glassdoor",
+    "ziprecruiter.com": "ZipRecruiter",
+    "linkedin.com": "LinkedIn",
+    "cdllife.com": "CDL Life",
+    "truckingtruth.com": "Trucking Truth",
+    "truckdrivingjobs.com": "Truck Driving Jobs",
+    "driverjobsite.com": "Driver Job Site",
+    "jobisjob.com": "JobisJob",
+    "simplyhired.com": "SimplyHired",
+    "careerbuilder.com": "CareerBuilder",
+    "monster.com": "Monster",
+    "driveforwardtransportation.com": "Drive Forward Transportation",
+    "livetrucking.com": "Live Trucking",
+    "truckerjobusa.com": "Trucker Job USA",
+}
+
+# Subdomain prefixes that hint at a company/region (e.g. "amazon-na" in "amazon-na.fountain.com")
+# These get turned into a prefix like "Amazon NA"
+
+
+def _normalize_job_board(url: str) -> str:
+    """
+    Derive a clean, human-readable job board name from a URL.
+
+    Examples:
+        thetruckersreport.com/jobs/...     → "The Truckers Report"
+        amazon-na.fountain.com/...          → "Amazon NA - Fountain"
+        indeed.com/viewjob?jk=abc           → "Indeed"
+        some-unknown-board.com/jobs/123     → "Some Unknown Board"
+    """
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return "Unknown"
+
+    if not host:
+        return "Unknown"
+
+    # Remove www.
+    host = re.sub(r'^www\.', '', host)
+
+    # Check exact match first (e.g. "thetruckersreport.com")
+    # Extract base domain (last 2 parts: "fountain.com" from "amazon-na.fountain.com")
+    parts = host.split(".")
+    if len(parts) >= 2:
+        base_domain = ".".join(parts[-2:])
+    else:
+        base_domain = host
+
+    # Check if base domain is known
+    if base_domain in KNOWN_JOB_BOARDS:
+        board_name = KNOWN_JOB_BOARDS[base_domain]
+
+        # If there's a subdomain prefix (e.g. "amazon-na"), add it
+        subdomain = host.replace(f".{base_domain}", "").replace(base_domain, "")
+        skip_subs = {"www", "jobs", "careers", "apply", "hire", "app", "m"}
+        if subdomain and subdomain not in skip_subs:
+            # "amazon-na" → "Amazon NA"
+            prefix = subdomain.replace("-", " ").replace(".", " ").strip().title()
+            # Uppercase 2-letter tokens (NA, US, EU...)
+            prefix = re.sub(r'\b([A-Za-z]{2})\b', lambda m: m.group(1).upper(), prefix)
+            return f"{prefix} - {board_name}"
+        return board_name
+
+    # Unknown domain → generate a clean name from the domain
+    # "some-trucking-board.com" → "Some Trucking Board"
+    domain_name = base_domain.rsplit(".", 1)[0]  # remove TLD
+    clean = domain_name.replace("-", " ").replace("_", " ").strip().title()
+    return clean or "Unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +215,8 @@ def _ensure_csv_header(path: str) -> None:
                 writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
 
 
-def _append_results(path: str, url: str, job_title: str, company: str,
-                    website: str, makers: list) -> None:
+def _append_results(path: str, url: str, job_board: str, job_title: str,
+                    company: str, website: str, makers: list) -> None:
     """Append results for one URL to the CSV."""
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -143,6 +225,7 @@ def _append_results(path: str, url: str, job_title: str, company: str,
                 writer.writerow({
                     "Timestamp": datetime.now().isoformat(),
                     "Job URL": url,
+                    "Job Board": job_board,
                     "Job Title": job_title,
                     "Company Name": company,
                     "Company Website": website,
@@ -158,6 +241,7 @@ def _append_results(path: str, url: str, job_title: str, company: str,
             writer.writerow({
                 "Timestamp": datetime.now().isoformat(),
                 "Job URL": url,
+                "Job Board": job_board,
                 "Job Title": job_title,
                 "Company Name": company,
                 "Company Website": website,
@@ -185,9 +269,13 @@ def process_one_url(
     """Run the full pipeline for a single job URL. Returns Clay push counts."""
     clay_counts = {"jobs": 0, "contacts": 0}
 
+    # -- Derive job board name from URL --
+    job_board = _normalize_job_board(url)
+
     # -- Step 1: Scrape the job posting --
     print("\n  STEP 1: Scraping job posting…")
     job = scrape_job(url, session=session)
+    print(f"    Job Board : {job_board}")
     print(f"    Job Title : {job.title}")
     print(f"    Company   : {job.company_name}")
     print(f"    Desc      : {job.description[:120]}…")
@@ -246,7 +334,7 @@ def process_one_url(
         print("    No decision makers found.")
 
     # -- Save to CSV --
-    _append_results(output_path, url, job.title, job.company_name,
+    _append_results(output_path, url, job_board, job.title, job.company_name,
                     domain or "", makers)
 
     # -- Push to Clay --
@@ -255,6 +343,7 @@ def process_one_url(
         valid_count = sum(1 for dm in makers if dm.linkedin) if makers else 0
         job_data = {
             "Job URL": url,
+            "Job Board": job_board,
             "Job Title": job.title,
             "Company Name": job.company_name,
             "Company Website": domain or "",
@@ -281,6 +370,7 @@ def process_one_url(
                 "Status": "Valid" if dm.linkedin else "Invalid",
                 "Source": dm.source,
                 "Mentioned in Job Posting": "Yes" if dm.mentioned_in_job_posting else "No",
+                "Job Board": job_board,
                 "Job URL": url,
             }
             if _push_to_clay(clay_contacts_url, contact_data, session):
