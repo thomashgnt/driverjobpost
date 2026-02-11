@@ -10,8 +10,9 @@ One command to rule them all:
     # Multiple URLs
     python3 scrapers/pipeline.py "url1" "url2" "url3"
 
-    # From a file (one URL per line)
+    # From a file (one URL per line, or CSV with URL,Title columns)
     python3 scrapers/pipeline.py -f urls.txt
+    python3 scrapers/pipeline.py -f job_offers.csv
 
     # Resume after interruption
     python3 scrapers/pipeline.py -f urls.txt --resume
@@ -42,7 +43,9 @@ import requests
 # Allow running as: python3 scrapers/pipeline.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scrapers.scrape_job import scrape_job
+from scrapers.scrape_job import (
+    scrape_job, JobInfo, _extract_real_company, _is_fountain_amazon_dsp,
+)
 from scrapers.find_domain import find_company_domain
 from scrapers.find_decision_makers import find_decision_makers
 from scrapers.find_linkedin import find_linkedin_url
@@ -149,6 +152,85 @@ def _normalize_job_board(url: str) -> str:
     domain_name = base_domain.rsplit(".", 1)[0]  # remove TLD
     clean = domain_name.replace("-", " ").replace("_", " ").strip().title()
     return clean or "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# CSV title pre-parsing (extract company name without Linkup API call)
+# ---------------------------------------------------------------------------
+
+# Patterns to strip from CSV titles when extracting a clean job title
+_PRICE_RE = re.compile(r'\$[\d,.]+(?:/hr)?(?:\s*HR)?\+?\s*[:\-–—]?\s*', re.IGNORECASE)
+_STATION_CODE_RE = re.compile(r'\b[A-Z]{1,4}\d{1,2}\b')
+
+
+def _extract_job_title_from_csv(csv_title: str, company: str) -> str:
+    """Extract a clean job title from a CSV title string.
+
+    "$18/hr - Delivery Helper - Next Steps Logistics LLC - Amazon DSP"
+    → "Delivery Helper"
+    """
+    # Split by common separators
+    for sep in (" - ", " – ", " — ", " | "):
+        parts = csv_title.split(sep)
+        if len(parts) >= 2:
+            candidates = []
+            for part in parts:
+                p = part.strip()
+                # Skip if it's the company name, "Amazon DSP", or a station code
+                if not p:
+                    continue
+                if company and company.lower() in p.lower():
+                    continue
+                if "amazon" in p.lower() and "dsp" in p.lower():
+                    continue
+                if _STATION_CODE_RE.fullmatch(p.strip()):
+                    continue
+                # Strip leading price ("$18/hr - " or "$22.25 HR+ : ")
+                p = _PRICE_RE.sub("", p).strip()
+                if not p:
+                    continue
+                # Check if this looks like a job title (contains job-like words)
+                lower = p.lower()
+                job_words = ("driver", "delivery", "associate", "helper", "dispatcher",
+                             "warehouse", "handler", "loader", "sorter", "cdl", "truck")
+                if any(w in lower for w in job_words):
+                    candidates.append(p)
+            if candidates:
+                return candidates[0]
+    return ""
+
+
+def _parse_job_from_csv_title(csv_title: str, url: str) -> JobInfo | None:
+    """Try to extract job title and company from a CSV title string.
+
+    Returns a partial JobInfo if company extraction succeeds, None otherwise.
+    Only applies to Fountain Amazon DSP URLs.
+    """
+    if not csv_title:
+        return None
+    if not _is_fountain_amazon_dsp(url):
+        return None
+
+    company = _extract_real_company(csv_title, csv_title)
+
+    # If we got back the original string or something useless, extraction failed
+    if not company or company == csv_title or len(company) > 80:
+        return None
+    if "unknown" in company.lower() or "amazon" in company.lower():
+        return None
+
+    # Strip trailing parenthetical noise like "(DGR8" or "(DGR8 - GLAK)"
+    company = re.sub(r'\s*\([^)]*$', '', company).strip()  # unclosed paren
+    company = re.sub(r'\s*\([A-Z0-9]{2,5}(?:\s*[-–]\s*[A-Z0-9]{2,5})?\)', '', company).strip()
+
+    job_title = _extract_job_title_from_csv(csv_title, company)
+
+    return JobInfo(
+        title=job_title or "Delivery Associate",
+        company_name=company,
+        description="",
+        source_url=url,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +347,7 @@ def process_one_url(
     output_path: str,
     clay_jobs_url: str | None = None,
     clay_contacts_url: str | None = None,
+    csv_title: str = "",
 ) -> dict:
     """Run the full pipeline for a single job URL. Returns Clay push counts."""
     clay_counts = {"jobs": 0, "contacts": 0}
@@ -272,9 +355,26 @@ def process_one_url(
     # -- Derive job board name from URL --
     job_board = _normalize_job_board(url)
 
+    # -- Pre-parse company from CSV title (saves Linkup credits) --
+    csv_job = _parse_job_from_csv_title(csv_title, url) if csv_title else None
+    if csv_job:
+        print(f"\n  [CSV PRE-PARSE] Company: {csv_job.company_name}")
+
     # -- Step 1: Scrape the job posting --
     print("\n  STEP 1: Scraping job posting…")
     job = scrape_job(url, session=session)
+
+    # Override company if Linkup gave a bad result but CSV has the real one
+    if csv_job:
+        linkup_co = job.company_name.lower()
+        if (linkup_co in ("unknown company", "unknown", "")
+                or "amazon" in linkup_co):
+            log.info("Using CSV company '%s' (Linkup gave '%s')",
+                     csv_job.company_name, job.company_name)
+            job.company_name = csv_job.company_name
+            if not job.title or job.title.lower() in ("unknown", "unknown title"):
+                job.title = csv_job.title
+
     print(f"    Job Board : {job_board}")
     print(f"    Job Title : {job.title}")
     print(f"    Company   : {job.company_name}")
@@ -380,9 +480,13 @@ def process_one_url(
     return clay_counts
 
 
-def collect_urls(args) -> list[str]:
-    """Collect URLs from arguments and/or file, deduplicated."""
-    urls: list[str] = []
+def collect_urls(args) -> list[tuple[str, str]]:
+    """Collect (url, csv_title) pairs from arguments and/or file, deduplicated.
+
+    csv_title is empty string when URL comes from CLI args or plain text file.
+    When reading a CSV file (extension .csv), the Title column is extracted.
+    """
+    urls: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     # From positional arguments
@@ -390,16 +494,28 @@ def collect_urls(args) -> list[str]:
         u = u.strip()
         if u and u not in seen:
             seen.add(u)
-            urls.append(u)
+            urls.append((u, ""))
 
     # From file
     if args.file:
-        with open(args.file, encoding="utf-8") as f:
-            for line in f:
-                u = line.strip()
-                if u and not u.startswith("#") and u not in seen:
-                    seen.add(u)
-                    urls.append(u)
+        if args.file.lower().endswith(".csv"):
+            # CSV file with headers (expects at least a "URL" column)
+            with open(args.file, encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    u = row.get("URL", "").strip()
+                    title = row.get("Title", "").strip()
+                    if u and u not in seen:
+                        seen.add(u)
+                        urls.append((u, title))
+        else:
+            # Plain text file: one URL per line
+            with open(args.file, encoding="utf-8") as f:
+                for line in f:
+                    u = line.strip()
+                    if u and not u.startswith("#") and u not in seen:
+                        seen.add(u)
+                        urls.append((u, ""))
 
     return urls
 
@@ -415,7 +531,7 @@ def main() -> None:
     )
     parser.add_argument(
         "-f", "--file",
-        help="Text file with one URL per line",
+        help="Text file (one URL per line) or CSV file with URL,Title columns",
     )
     parser.add_argument(
         "-o", "--output",
@@ -443,17 +559,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Collect all URLs
+    # Collect all URLs (list of (url, csv_title) tuples)
     urls = collect_urls(args)
     if not urls:
-        print("No URLs provided. Use: pipeline.py URL [URL ...] or pipeline.py -f urls.txt")
+        print("No URLs provided. Use: pipeline.py URL [URL ...] or pipeline.py -f file.csv")
         sys.exit(1)
 
     # Resume: skip already-done URLs
     if args.resume:
         already_done = _load_already_done(args.output)
         before = len(urls)
-        urls = [u for u in urls if u not in already_done]
+        urls = [(u, t) for u, t in urls if u not in already_done]
         log.info("Resume: %d already done, %d remaining", before - len(urls), len(urls))
 
     _ensure_csv_header(args.output)
@@ -467,7 +583,7 @@ def main() -> None:
     total_clay_jobs = 0
     total_clay_contacts = 0
 
-    for i, url in enumerate(urls, start=1):
+    for i, (url, csv_title) in enumerate(urls, start=1):
         print(f"\n{'=' * 60}")
         print(f"  [{i}/{total}] {url}")
         print(f"{'=' * 60}")
@@ -477,6 +593,7 @@ def main() -> None:
                 url, session, args.output,
                 clay_jobs_url=args.clay_jobs,
                 clay_contacts_url=args.clay_contacts,
+                csv_title=csv_title,
             )
             total_clay_jobs += counts["jobs"]
             total_clay_contacts += counts["contacts"]
