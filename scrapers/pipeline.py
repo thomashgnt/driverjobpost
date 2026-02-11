@@ -2,45 +2,51 @@
 """
 Job Offer Pipeline
 ==================
-One command to rule them all:
+Usage:
 
-    # One URL
-    python3 scrapers/pipeline.py "https://www.thetruckersreport.com/jobs/..."
+    # Simplest — drop a CSV in inbox/ and run:
+    python3 run.py
 
-    # Multiple URLs
-    python3 scrapers/pipeline.py "url1" "url2" "url3"
+    # Or give a file directly:
+    python3 run.py my_jobs.csv
 
-    # From a file (one URL per line, or CSV with URL,Title columns)
-    python3 scrapers/pipeline.py -f urls.txt
-    python3 scrapers/pipeline.py -f job_offers.csv
+    # Or a single URL:
+    python3 run.py "https://amazon-na.fountain.com/..."
 
-    # Resume after interruption
-    python3 scrapers/pipeline.py -f urls.txt --resume
+    # Watch mode — auto-processes new CSV files dropped into inbox/:
+    python3 run.py --watch
 
-    # Push results to Clay (2 tables)
-    python3 scrapers/pipeline.py --clay-jobs "WEBHOOK_URL" --clay-contacts "WEBHOOK_URL" "url1"
+    # Resume after interruption (skips already-done URLs):
+    python3 run.py my_jobs.csv --resume
 
-This will, for each URL:
+    # Without Clay (CSV only):
+    python3 run.py my_jobs.csv --no-clay
+
+Config: edit scrapers/config.py to change Clay webhook URLs and defaults.
+
+Pipeline steps for each URL:
   1. Scrape the job posting (title, company, description, contact)
   2. Find the company's official website
   3. Find decision makers (5-priority deep search)
   4. Find LinkedIn profiles (skip if already found in step 3)
-  5. Save everything to a CSV + push to Clay (if configured)
+  5. Save everything to a CSV + push to Clay
 """
 
 import sys
 import os
 import csv
+import glob as globmod
 import logging
 import argparse
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
 
-# Allow running as: python3 scrapers/pipeline.py
+# Allow running as: python3 scrapers/pipeline.py  OR  python3 run.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scrapers.scrape_job import (
@@ -49,6 +55,10 @@ from scrapers.scrape_job import (
 from scrapers.find_domain import find_company_domain
 from scrapers.find_decision_makers import find_decision_makers
 from scrapers.find_linkedin import find_linkedin_url
+from scrapers.config import (
+    CLAY_JOBS_WEBHOOK, CLAY_CONTACTS_WEBHOOK, CLAY_ENABLED,
+    DELAY_BETWEEN_URLS, OUTPUT_CSV as DEFAULT_OUTPUT_CSV, WATCH_FOLDER,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,8 +66,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-OUTPUT_CSV = "pipeline_results.csv"
 CSV_FIELDS = [
     "Timestamp",
     "Job URL",
@@ -480,103 +488,54 @@ def process_one_url(
     return clay_counts
 
 
-def collect_urls(args) -> list[tuple[str, str]]:
-    """Collect (url, csv_title) pairs from arguments and/or file, deduplicated.
 
-    csv_title is empty string when URL comes from CLI args or plain text file.
-    When reading a CSV file (extension .csv), the Title column is extracted.
+def _auto_find_csv() -> str | None:
+    """Look for a CSV file to process automatically.
+
+    Priority: 1) inbox/*.csv  2) *.csv in current dir (excluding pipeline output)
     """
-    urls: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    # Check inbox folder first
+    inbox = Path(WATCH_FOLDER)
+    if inbox.is_dir():
+        csvs = sorted(inbox.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if csvs:
+            return str(csvs[0])
 
-    # From positional arguments
-    for u in (args.urls or []):
-        u = u.strip()
-        if u and u not in seen:
-            seen.add(u)
-            urls.append((u, ""))
-
-    # From file
-    if args.file:
-        if args.file.lower().endswith(".csv"):
-            # CSV file with headers (expects at least a "URL" column)
-            with open(args.file, encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    u = row.get("URL", "").strip()
-                    title = row.get("Title", "").strip()
-                    if u and u not in seen:
-                        seen.add(u)
-                        urls.append((u, title))
-        else:
-            # Plain text file: one URL per line
-            with open(args.file, encoding="utf-8") as f:
-                for line in f:
-                    u = line.strip()
-                    if u and not u.startswith("#") and u not in seen:
-                        seen.add(u)
-                        urls.append((u, ""))
-
-    return urls
+    # Fall back to current directory
+    csvs = [
+        f for f in globmod.glob("*.csv")
+        if f != DEFAULT_OUTPUT_CSV and not f.startswith("test")
+    ]
+    if len(csvs) == 1:
+        return csvs[0]
+    return None
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Pipeline: Job URL -> Company -> Domain -> Decision Makers",
-    )
-    parser.add_argument(
-        "urls",
-        nargs="*",
-        help="One or more job posting URLs",
-    )
-    parser.add_argument(
-        "-f", "--file",
-        help="Text file (one URL per line) or CSV file with URL,Title columns",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        default=OUTPUT_CSV,
-        help=f"Output CSV file (default: {OUTPUT_CSV})",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=1.0,
-        help="Delay in seconds between URLs (default: 1)",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Skip URLs already present in the output CSV",
-    )
-    parser.add_argument(
-        "--clay-jobs",
-        help="Clay webhook URL for Job Offers table",
-    )
-    parser.add_argument(
-        "--clay-contacts",
-        help="Clay webhook URL for Contacts table",
-    )
-    args = parser.parse_args()
-
-    # Collect all URLs (list of (url, csv_title) tuples)
-    urls = collect_urls(args)
-    if not urls:
-        print("No URLs provided. Use: pipeline.py URL [URL ...] or pipeline.py -f file.csv")
-        sys.exit(1)
-
-    # Resume: skip already-done URLs
-    if args.resume:
-        already_done = _load_already_done(args.output)
+def run_batch(
+    urls: list[tuple[str, str]],
+    output_path: str,
+    clay_jobs_url: str | None,
+    clay_contacts_url: str | None,
+    delay: float,
+    resume: bool = False,
+) -> None:
+    """Process a list of (url, csv_title) pairs through the full pipeline."""
+    if resume:
+        already_done = _load_already_done(output_path)
         before = len(urls)
         urls = [(u, t) for u, t in urls if u not in already_done]
         log.info("Resume: %d already done, %d remaining", before - len(urls), len(urls))
 
-    _ensure_csv_header(args.output)
+    if not urls:
+        print("Nothing to process (all URLs already done).")
+        return
+
+    _ensure_csv_header(output_path)
 
     total = len(urls)
+    clay_on = bool(clay_jobs_url or clay_contacts_url)
     log.info("Processing %d URL(s)…", total)
-    if args.clay_jobs or args.clay_contacts:
+    if clay_on:
         log.info("Clay integration enabled")
 
     session = requests.Session()
@@ -590,9 +549,9 @@ def main() -> None:
 
         try:
             counts = process_one_url(
-                url, session, args.output,
-                clay_jobs_url=args.clay_jobs,
-                clay_contacts_url=args.clay_contacts,
+                url, session, output_path,
+                clay_jobs_url=clay_jobs_url,
+                clay_contacts_url=clay_contacts_url,
                 csv_title=csv_title,
             )
             total_clay_jobs += counts["jobs"]
@@ -602,14 +561,193 @@ def main() -> None:
             print(f"  ERROR: {exc} — skipping to next URL")
 
         if i < total:
-            time.sleep(args.delay)
+            time.sleep(delay)
 
     print(f"\n{'=' * 60}")
     print(f"  DONE! {total} URL(s) processed.")
-    print(f"  Results saved to: {args.output}")
-    if args.clay_jobs or args.clay_contacts:
+    print(f"  Results saved to: {output_path}")
+    if clay_on:
         print(f"  Clay: {total_clay_jobs} jobs + {total_clay_contacts} contacts pushed")
     print(f"{'=' * 60}")
+
+
+def _watch_inbox(
+    output_path: str,
+    clay_jobs_url: str | None,
+    clay_contacts_url: str | None,
+    delay: float,
+) -> None:
+    """Watch the inbox folder for new CSV files and process them automatically."""
+    inbox = Path(WATCH_FOLDER)
+    inbox.mkdir(exist_ok=True)
+    processed_dir = inbox / "done"
+    processed_dir.mkdir(exist_ok=True)
+
+    print(f"\n  WATCH MODE — Drop a CSV file into '{inbox}/' and it will be processed automatically.")
+    print(f"  Press Ctrl+C to stop.\n")
+
+    seen: set[str] = set()
+    # Mark files already present as seen (don't re-process)
+    for f in inbox.glob("*.csv"):
+        seen.add(f.name)
+        log.info("Already in inbox (skipping): %s", f.name)
+
+    try:
+        while True:
+            for csv_file in sorted(inbox.glob("*.csv")):
+                if csv_file.name in seen:
+                    continue
+                seen.add(csv_file.name)
+                print(f"\n  NEW FILE DETECTED: {csv_file.name}")
+                print(f"{'=' * 60}")
+
+                # Read URLs from the new CSV
+                urls: list[tuple[str, str]] = []
+                with open(csv_file, encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        u = row.get("URL", "").strip()
+                        title = row.get("Title", "").strip()
+                        if u:
+                            urls.append((u, title))
+
+                if urls:
+                    run_batch(urls, output_path, clay_jobs_url,
+                              clay_contacts_url, delay, resume=True)
+                    # Move processed file to done/
+                    dest = processed_dir / csv_file.name
+                    csv_file.rename(dest)
+                    log.info("Moved %s → %s", csv_file.name, dest)
+                else:
+                    log.warning("No URLs found in %s", csv_file.name)
+
+            time.sleep(5)  # Poll every 5 seconds
+    except KeyboardInterrupt:
+        print("\n  Watch mode stopped.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Pipeline: Job URL -> Company -> Domain -> Decision Makers -> Clay",
+    )
+    parser.add_argument(
+        "input",
+        nargs="*",
+        help="URL(s) or a CSV file path. If omitted, auto-detects CSV in inbox/ or current dir.",
+    )
+    parser.add_argument(
+        "-f", "--file",
+        help="CSV file with URL,Title columns (or plain text, one URL per line)",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default=DEFAULT_OUTPUT_CSV,
+        help=f"Output CSV file (default: {DEFAULT_OUTPUT_CSV})",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=DELAY_BETWEEN_URLS,
+        help=f"Delay in seconds between URLs (default: {DELAY_BETWEEN_URLS})",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip URLs already present in the output CSV",
+    )
+    parser.add_argument(
+        "--no-clay",
+        action="store_true",
+        help="Disable Clay push (CSV output only)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help=f"Watch '{WATCH_FOLDER}/' for new CSV files and process them automatically",
+    )
+    args = parser.parse_args()
+
+    # Resolve Clay webhook URLs from config (unless --no-clay)
+    if args.no_clay:
+        clay_jobs_url = None
+        clay_contacts_url = None
+    elif CLAY_ENABLED:
+        clay_jobs_url = CLAY_JOBS_WEBHOOK
+        clay_contacts_url = CLAY_CONTACTS_WEBHOOK
+    else:
+        clay_jobs_url = None
+        clay_contacts_url = None
+
+    # Watch mode
+    if args.watch:
+        _watch_inbox(args.output, clay_jobs_url, clay_contacts_url, args.delay)
+        return
+
+    # Smart input detection: positional arg can be a file path or URL(s)
+    file_path = args.file
+    raw_urls: list[str] = []
+
+    for item in (args.input or []):
+        item = item.strip()
+        if not item:
+            continue
+        # If it looks like a file path (exists or ends in .csv/.txt), treat as file
+        if os.path.isfile(item):
+            file_path = item
+        else:
+            raw_urls.append(item)
+
+    # Collect URLs
+    urls: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for u in raw_urls:
+        if u not in seen:
+            seen.add(u)
+            urls.append((u, ""))
+
+    if file_path:
+        urls.extend(_read_file(file_path, seen))
+
+    # Auto-detect if nothing provided
+    if not urls:
+        auto = _auto_find_csv()
+        if auto:
+            print(f"  Auto-detected: {auto}")
+            urls.extend(_read_file(auto, seen))
+
+    if not urls:
+        print("No input found. Usage:")
+        print("  python3 run.py my_jobs.csv           # Process a CSV file")
+        print("  python3 run.py \"https://...\"          # Process a single URL")
+        print("  python3 run.py --watch                # Watch inbox/ for new files")
+        print(f"\nOr drop a CSV file into '{WATCH_FOLDER}/' and run: python3 run.py")
+        sys.exit(1)
+
+    run_batch(urls, args.output, clay_jobs_url, clay_contacts_url,
+              args.delay, resume=args.resume)
+
+
+def _read_file(path: str, seen: set[str]) -> list[tuple[str, str]]:
+    """Read URLs from a file (CSV or plain text)."""
+    urls: list[tuple[str, str]] = []
+    if path.lower().endswith(".csv"):
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                u = row.get("URL", "").strip()
+                title = row.get("Title", "").strip()
+                if u and u not in seen:
+                    seen.add(u)
+                    urls.append((u, title))
+    else:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                u = line.strip()
+                if u and not u.startswith("#") and u not in seen:
+                    seen.add(u)
+                    urls.append((u, ""))
+    return urls
 
 
 if __name__ == "__main__":
