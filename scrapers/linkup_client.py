@@ -5,6 +5,8 @@ Every other module uses this "phone" to call the Linkup service.
 Provides: fetch, search, structured search, and first-URL search.
 """
 
+from __future__ import annotations
+
 import time
 import logging
 from urllib.parse import urlparse

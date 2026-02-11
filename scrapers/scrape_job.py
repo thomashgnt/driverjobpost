@@ -10,6 +10,8 @@ Special handling for Amazon DSP / Fountain pages where the actual employer
 is the DSP company (e.g. "Next Steps Logistics LLC"), not "Amazon".
 """
 
+from __future__ import annotations
+
 import json
 import re
 import logging

@@ -9,6 +9,8 @@ Step 3: Deep search for decision makers at a company.
   5. Fallback — find anyone at the company
 """
 
+from __future__ import annotations
+
 import json
 import re
 import logging

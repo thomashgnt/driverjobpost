@@ -11,6 +11,8 @@ Simple launcher — just run:
 Config: edit scrapers/config.py to change Clay webhook URLs.
 """
 
+from __future__ import annotations
+
 from scrapers.pipeline import main
 
 if __name__ == "__main__":
