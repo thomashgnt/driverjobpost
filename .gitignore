@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+pipeline_results.csv
+test3.csv
