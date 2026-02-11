@@ -4,6 +4,8 @@ Pipeline Configuration
 Edit this file to set your default Clay webhook URLs and other settings.
 """
 
+from __future__ import annotations
+
 # ---------------------------------------------------------------------------
 # Clay webhook URLs (set once, never type again)
 # ---------------------------------------------------------------------------

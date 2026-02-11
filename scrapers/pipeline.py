@@ -32,6 +32,8 @@ Pipeline steps for each URL:
   5. Save everything to a CSV + push to Clay
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import csv

@@ -21,6 +21,8 @@ Strategy:
   4. Deduplicate and save
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import re

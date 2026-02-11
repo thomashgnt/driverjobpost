@@ -2,6 +2,8 @@
 Step 2: Find a company's official website via Linkup search.
 """
 
+from __future__ import annotations
+
 import logging
 
 import requests

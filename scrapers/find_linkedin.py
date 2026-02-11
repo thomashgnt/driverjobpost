@@ -6,6 +6,8 @@ Validates that the result is for someone at the right company,
 not just a person with a similar name.
 """
 
+from __future__ import annotations
+
 import re
 import logging
 
