@@ -32,7 +32,17 @@ class DecisionMaker:
     source: str                          # "Job Posting", "Company Website", "LinkedIn", "Web Search"
     mentioned_in_job_posting: bool = False
     linkedin: str = ""
-    status: str = "Invalid"              # "Valid" if linkedin found, else "Invalid"
+    confidence: str = "Low"              # "High", "Medium", "Low"
+
+
+# Names that indicate a failed extraction (case-insensitive)
+REJECT_NAMES = {
+    "unknown", "n/a", "not specified", "not found", "not available",
+    "none", "no name", "no contact", "the company", "the owner",
+}
+
+# Max contacts to keep per company (if more, it's likely noise)
+MAX_CONTACTS_PER_COMPANY = 5
 
 
 # ---------------------------------------------------------------------------
@@ -124,20 +134,101 @@ SOURCE_PRIORITY = {
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _compute_confidence(
+    source: str,
+    linkedin: str,
+    mentioned_in_posting: bool,
+    name: str,
+) -> str:
+    """
+    Compute a confidence score for a decision maker.
+
+    High   = LinkedIn confirmed OR mentioned in the job posting
+    Medium = Found on company website or full name from web search
+    Low    = Single-word name, fallback result, or unconfirmed
+    """
+    if linkedin or mentioned_in_posting:
+        return "High"
+    if source in ("Company Website", "Job Posting"):
+        return "Medium"
+    # Web Search with full name (2+ words) = Medium
+    if source in ("LinkedIn", "Web Search") and len(name.split()) >= 2:
+        return "Medium"
+    return "Low"
+
+
+def _is_valid_name(name: str) -> bool:
+    """Reject names that are clearly bad extractions."""
+    stripped = name.strip()
+    if not stripped:
+        return False
+    if stripped.lower() in REJECT_NAMES:
+        return False
+    # Reject single-word names (e.g. "Chris", "Angie")
+    if len(stripped.split()) < 2:
+        log.debug("Rejecting single-word name: '%s'", stripped)
+        return False
+    return True
+
+
+def _title_company_matches(title: str, company_name: str) -> bool:
+    """
+    If a title contains 'at [Company]', verify it's the right company.
+    Returns True if no 'at' clause found, or if the company matches.
+    Returns False if the title references a DIFFERENT company.
+    """
+    # Look for "at Company Name" pattern
+    match = re.search(r'\bat\s+(.+?)(?:\s*$|\s*,)', title, re.IGNORECASE)
+    if not match:
+        return True  # no "at" clause, can't check — allow it
+
+    title_company = match.group(1).strip().lower()
+    # Remove suffixes for comparison
+    from scrapers.find_domain import _clean_company_name
+    clean_target = _clean_company_name(company_name).lower()
+    clean_title = _clean_company_name(title_company).lower()
+
+    # Check if the title company matches the target company.
+    # Strategy: both names must share most of their distinctive words.
+    skip = {"the", "and", "of", "a", "an", "for", "in", "at", "by", "to", "company"}
+    target_words = set(clean_target.split()) - skip
+    title_words = set(clean_title.split()) - skip
+
+    if not target_words:
+        return True  # can't compare, allow it
+
+    # Require that the majority of target words appear in the title company
+    common = target_words & title_words
+    match_ratio = len(common) / len(target_words) if target_words else 0
+    if match_ratio < 0.75:
+        log.debug("Rejecting '%s' — title company '%s' doesn't match '%s' (%.0f%% overlap)",
+                  title, title_company, company_name, match_ratio * 100)
+        return False
+    return True
+
+
 def _add_person(
     all_people: dict[str, "DecisionMaker"],
     name: str,
     title: str,
     source: str,
+    company_name: str = "",
     mentioned_in_posting: bool = False,
     linkedin: str = "",
 ) -> None:
     """Add a person to the dedup dict. Higher-priority source wins."""
     name = name.strip()
     title = title.strip()
-    if not name or name.lower() in ("unknown", "n/a", ""):
+
+    # ── Reject bad names ──────────────────────────────────────────────
+    if not _is_valid_name(name):
         return
 
+    # ── Reject wrong-company titles ───────────────────────────────────
+    if company_name and not _title_company_matches(title, company_name):
+        return
+
+    # ── Categorize ────────────────────────────────────────────────────
     # For job posting contacts, force Hiring category even if title doesn't match
     if source == "Job Posting" and mentioned_in_posting:
         category = _categorize_title(title) or "Hiring"
@@ -147,6 +238,10 @@ def _add_person(
             log.debug("Skipping '%s' with irrelevant title '%s'", name, title)
             return
 
+    # ── Compute confidence ────────────────────────────────────────────
+    confidence = _compute_confidence(source, linkedin, mentioned_in_posting, name)
+
+    # ── Dedup: merge or create ────────────────────────────────────────
     key = name.lower()
     if key in all_people:
         existing = all_people[key]
@@ -157,7 +252,10 @@ def _add_person(
             existing.mentioned_in_job_posting = True
         if linkedin and not existing.linkedin:
             existing.linkedin = linkedin
-            existing.status = "Valid"
+        # Upgrade confidence if the new source is stronger
+        rank = {"High": 2, "Medium": 1, "Low": 0}
+        if rank.get(confidence, 0) > rank.get(existing.confidence, 0):
+            existing.confidence = confidence
     else:
         all_people[key] = DecisionMaker(
             name=name,
@@ -166,13 +264,13 @@ def _add_person(
             source=source,
             mentioned_in_job_posting=mentioned_in_posting,
             linkedin=linkedin,
-            status="Valid" if linkedin else "Invalid",
+            confidence=confidence,
         )
 
 
 def _count_valid(all_people: dict) -> int:
-    """Count people with a LinkedIn URL (Valid status)."""
-    return sum(1 for p in all_people.values() if p.linkedin)
+    """Count people with High confidence (LinkedIn or mentioned in posting)."""
+    return sum(1 for p in all_people.values() if p.confidence == "High")
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +305,8 @@ def _priority_1_job_posting(
     if not title:
         title = "Recruiter / Contact"
 
-    _add_person(all_people, contact_name, title, "Job Posting", mentioned_in_posting=True)
+    _add_person(all_people, contact_name, title, "Job Posting",
+                company_name=company_name, mentioned_in_posting=True)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +360,8 @@ def _priority_2_company_website(
             name = person.get("name", "").strip()
             title = person.get("title", "").strip()
             if name and title:
-                _add_person(all_people, name, title, "Company Website")
+                _add_person(all_people, name, title, "Company Website",
+                            company_name=company_name)
 
     # Step 2b: If we found <2 people, try fetching specific pages
     website_count = sum(1 for p in all_people.values() if p.source == "Company Website")
@@ -279,7 +379,8 @@ def _priority_2_company_website(
             if markdown and len(markdown) > 200:
                 people = _extract_people_from_markdown(markdown)
                 for name, title in people:
-                    _add_person(all_people, name, title, "Company Website")
+                    _add_person(all_people, name, title, "Company Website",
+                                company_name=company_name)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +463,8 @@ def _priority_3_linkedin(
                 log.info("Skipping '%s' — company '%s' not confirmed in LinkedIn result", name, company_name)
                 continue
 
-            _add_person(all_people, name, title or "Unknown Role", "LinkedIn", linkedin=url)
+            _add_person(all_people, name, title or "Unknown Role", "LinkedIn",
+                        company_name=company_name, linkedin=url)
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +506,8 @@ def _priority_4_web_search(
                 name = person.get("name", "").strip()
                 title = person.get("title", "").strip()
                 if name and title:
-                    _add_person(all_people, name, title, "Web Search")
+                    _add_person(all_people, name, title, "Web Search",
+                                company_name=company_name)
 
 
 # ---------------------------------------------------------------------------
@@ -427,16 +530,20 @@ def _priority_5_fallback(
         for person in data["people"]:
             name = person.get("name", "").strip()
             title = person.get("title", "").strip()
-            if name and name.lower() not in ("unknown", "n/a"):
-                category = _categorize_title(title) or "Operations & Fleet Management"
-                key = name.lower()
-                if key not in all_people:
-                    all_people[key] = DecisionMaker(
-                        name=name,
-                        title=title or "Employee",
-                        category=category,
-                        source="Web Search",
-                    )
+            if not _is_valid_name(name):
+                continue
+            if company_name and not _title_company_matches(title, company_name):
+                continue
+            category = _categorize_title(title) or "Operations & Fleet Management"
+            key = name.lower()
+            if key not in all_people:
+                all_people[key] = DecisionMaker(
+                    name=name,
+                    title=title or "Employee",
+                    category=category,
+                    source="Web Search",
+                    confidence="Low",  # fallback = low confidence
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +560,7 @@ def find_decision_makers(
 ) -> list[DecisionMaker]:
     """
     Deep search for decision makers using 5 priority levels.
-    Returns all found people (both Valid and Invalid status).
+    Returns up to MAX_CONTACTS_PER_COMPANY people, sorted by confidence.
     """
     sess = session or requests.Session()
     all_people: dict[str, DecisionMaker] = {}
@@ -479,7 +586,18 @@ def find_decision_makers(
     log.info("=== Priority 5: Fallback search ===")
     _priority_5_fallback(company_name, all_people, sess)
 
-    result = list(all_people.values())
-    valid = _count_valid(all_people)
-    log.info("Found %d decision makers (%d valid) for '%s'", len(result), valid, company_name)
+    # ── Limit results to top contacts ─────────────────────────────────
+    # Sort by confidence (High > Medium > Low), then by source priority
+    confidence_rank = {"High": 0, "Medium": 1, "Low": 2}
+    result = sorted(
+        all_people.values(),
+        key=lambda p: (confidence_rank.get(p.confidence, 9), SOURCE_PRIORITY.get(p.source, 9)),
+    )
+    if len(result) > MAX_CONTACTS_PER_COMPANY:
+        log.info("Trimming from %d to %d contacts", len(result), MAX_CONTACTS_PER_COMPANY)
+        result = result[:MAX_CONTACTS_PER_COMPANY]
+
+    high = sum(1 for p in result if p.confidence == "High")
+    log.info("Found %d decision makers (%d high-confidence) for '%s'",
+             len(result), high, company_name)
     return result

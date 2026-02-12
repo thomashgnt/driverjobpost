@@ -104,6 +104,8 @@ SKIP_DOMAINS = {
     "dnb.com", "zoominfo.com", "wikipedia.org", "google.com",
     "mapquest.com", "yellowpages.com", "manta.com",
     "trustpilot.com", "tiktok.com",
+    "carriersource.io", "safer.fmcsa.dot.gov", "fountain.com",
+    "amazon.com", "amazon.jobs",
 }
 
 

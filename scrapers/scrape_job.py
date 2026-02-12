@@ -33,6 +33,7 @@ class JobInfo:
     source_url: str
     contact_name: str = ""
     contact_email: str = ""
+    contact_phone: str = ""
 
 
 # JSON schema for structured extraction from Linkup
@@ -70,42 +71,76 @@ GENERIC_EMAIL_PREFIXES = {
     "recruiting", "hiring", "support", "admin", "contact", "office",
 }
 
+# US phone number pattern: (555) 123-4567, 555-123-4567, 555.123.4567, +1 555 123 4567
+PHONE_RE = re.compile(
+    r'(?:\+?1[-.\s]?)?'        # optional +1 country code
+    r'\(?\d{3}\)?'             # area code with optional parens
+    r'[-.\s]?'                 # separator
+    r'\d{3}'                   # exchange
+    r'[-.\s]?'                 # separator
+    r'\d{4}'                   # subscriber
+)
+
+# Name pattern: 2-3 capitalized words (used in several contact patterns below)
+_NAME_PAT = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'
+
 CONTACT_PATTERNS = [
-    re.compile(r'[Cc]ontact\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Aa]pply\s+(?:with|to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Ss]end\s+(?:your\s+)?(?:resume|CV|application)\s+to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Rr]ecruiter[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Hh]iring\s+[Mm]anager[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Pp]osted\s+by[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Aa]sk\s+for\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Rr]each\s+(?:out\s+)?to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Cc]all\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
-    re.compile(r'[Ee]mail\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'),
+    re.compile(r'[Cc]ontact\s+' + _NAME_PAT),
+    re.compile(r'[Aa]pply\s+(?:with|to)\s+' + _NAME_PAT),
+    re.compile(r'[Ss]end\s+(?:your\s+)?(?:resume|CV|application)\s+to\s+' + _NAME_PAT),
+    re.compile(r'[Rr]ecruiter[:\s]+' + _NAME_PAT),
+    re.compile(r'[Hh]iring\s+[Mm]anager[:\s]+' + _NAME_PAT),
+    re.compile(r'[Pp]osted\s+by[:\s]+' + _NAME_PAT),
+    re.compile(r'[Aa]sk\s+for\s+' + _NAME_PAT),
+    re.compile(r'[Rr]each\s+(?:out\s+)?to\s+' + _NAME_PAT),
+    re.compile(r'[Cc]all\s+' + _NAME_PAT),
+    re.compile(r'[Ee]mail\s+' + _NAME_PAT),
+    # Additional patterns for trucking/delivery job posts
+    re.compile(r'[Oo]wner[:\s]+' + _NAME_PAT),
+    re.compile(r'[Mm]anager[:\s]+' + _NAME_PAT),
+    re.compile(r'[Cc]all\s+(?:or\s+)?[Tt]ext\s+' + _NAME_PAT),
+    re.compile(r'[Ss]peak\s+(?:with|to)\s+' + _NAME_PAT),
+    re.compile(r'[Rr]eport\s+to\s+' + _NAME_PAT),
 ]
 
 # Words that look like names but aren't people
 NAME_BLOCKLIST = {
     "our team", "the company", "the office", "our office", "the driver",
     "our driver", "the recruiter", "your resume", "your cv",
+    "delivery service", "delivery associate", "delivery driver",
+    "customer service", "our location",
 }
 
 
-def _extract_contact_info(text: str) -> tuple[str, str]:
+def _extract_contact_info(text: str) -> tuple[str, str, str]:
     """
-    Extract a contact person name and email from job description text.
-    Returns (name, email). Either or both may be empty strings.
+    Extract a contact person name, email, and phone from job description text.
+    Returns (name, email, phone). Any may be empty strings.
     """
     if not text:
-        return "", ""
+        return "", "", ""
 
     # --- Email extraction ---
+    # First pass: look for a personal (non-generic) email
     email = ""
+    generic_email = ""
     for match in EMAIL_RE.finditer(text):
-        candidate = match.group(0).lower()
-        prefix = candidate.split("@")[0]
+        candidate = match.group(0)
+        prefix = candidate.lower().split("@")[0]
         if prefix not in GENERIC_EMAIL_PREFIXES:
-            email = match.group(0)
+            email = candidate
             break
+        elif not generic_email:
+            generic_email = candidate
+    # Fall back to generic email if no personal one found (still useful for outreach)
+    if not email and generic_email:
+        email = generic_email
+
+    # --- Phone extraction ---
+    phone = ""
+    m = PHONE_RE.search(text)
+    if m:
+        phone = m.group(0).strip()
 
     # --- Name extraction from patterns ---
     name = ""
@@ -124,7 +159,7 @@ def _extract_contact_info(text: str) -> tuple[str, str]:
         if len(parts) >= 2 and all(p.isalpha() for p in parts):
             name = " ".join(p.capitalize() for p in parts)
 
-    return name, email
+    return name, email, phone
 
 
 # ---------------------------------------------------------------------------
@@ -331,9 +366,10 @@ def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
         raw_text = markdown
         job = _extract_from_markdown(markdown, url)
         if job and job.company_name != "Unknown Company":
-            name, email = _extract_contact_info(raw_text)
+            name, email, phone = _extract_contact_info(raw_text)
             job.contact_name = name
             job.contact_email = email
+            job.contact_phone = phone
             return job
         log.warning("Could not parse company from markdown, trying structured search…")
 
@@ -355,7 +391,7 @@ def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
         else:
             company = _clean_company_name(raw_company)
 
-        name, email = _extract_contact_info(raw_text)
+        name, email, phone = _extract_contact_info(raw_text)
         return JobInfo(
             title=raw_title,
             company_name=company,
@@ -363,6 +399,7 @@ def scrape_job(url: str, session: requests.Session | None = None) -> JobInfo:
             source_url=url,
             contact_name=name,
             contact_email=email,
+            contact_phone=phone,
         )
 
     # --- Strategy C: extract from URL ---

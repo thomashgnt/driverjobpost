@@ -77,13 +77,15 @@ CSV_FIELDS = [
     "Job Title",
     "Company Name",
     "Company Website",
+    "Contact Phone",
+    "Contact Email",
     "Decision Maker Name",
     "Decision Maker Title",
     "Category",
     "Mentioned in Job Posting",
     "Source",
     "LinkedIn",
-    "Status",
+    "Confidence",
 ]
 
 # ---------------------------------------------------------------------------
@@ -310,7 +312,8 @@ def _ensure_csv_header(path: str) -> None:
 
 
 def _append_results(path: str, url: str, job_board: str, job_title: str,
-                    company: str, website: str, makers: list) -> None:
+                    company: str, website: str, makers: list,
+                    contact_phone: str = "", contact_email: str = "") -> None:
     """Append results for one URL to the CSV."""
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -323,13 +326,15 @@ def _append_results(path: str, url: str, job_board: str, job_title: str,
                     "Job Title": job_title,
                     "Company Name": company,
                     "Company Website": website,
+                    "Contact Phone": contact_phone,
+                    "Contact Email": contact_email,
                     "Decision Maker Name": dm.name,
                     "Decision Maker Title": dm.title,
                     "Category": dm.category,
                     "Mentioned in Job Posting": "Yes" if dm.mentioned_in_job_posting else "No",
                     "Source": dm.source,
                     "LinkedIn": dm.linkedin or "",
-                    "Status": "Valid" if dm.linkedin else "Invalid",
+                    "Confidence": dm.confidence,
                 })
         else:
             writer.writerow({
@@ -339,13 +344,15 @@ def _append_results(path: str, url: str, job_board: str, job_title: str,
                 "Job Title": job_title,
                 "Company Name": company,
                 "Company Website": website,
+                "Contact Phone": contact_phone,
+                "Contact Email": contact_email,
                 "Decision Maker Name": "",
                 "Decision Maker Title": "",
                 "Category": "",
                 "Mentioned in Job Posting": "",
                 "Source": "",
                 "LinkedIn": "",
-                "Status": "",
+                "Confidence": "",
             })
 
 
@@ -391,8 +398,15 @@ def process_one_url(
     print(f"    Job Title : {job.title}")
     print(f"    Company   : {job.company_name}")
     print(f"    Desc      : {job.description[:120]}…")
-    if job.contact_name:
-        print(f"    Contact   : {job.contact_name} ({job.contact_email or 'no email'})")
+    if job.contact_name or job.contact_email or job.contact_phone:
+        parts = []
+        if job.contact_name:
+            parts.append(job.contact_name)
+        if job.contact_email:
+            parts.append(job.contact_email)
+        if job.contact_phone:
+            parts.append(job.contact_phone)
+        print(f"    Contact   : {' | '.join(parts)}")
 
     # -- Step 2: Find company website --
     print("  STEP 2: Finding company website…")
@@ -435,24 +449,26 @@ def process_one_url(
         for cat, people in by_cat.items():
             print(f"    [{cat}]")
             for dm in people:
-                status = "Valid" if dm.linkedin else "Invalid"
                 tag = " [FROM JOB POSTING]" if dm.mentioned_in_job_posting else ""
-                print(f"      [{status}] {dm.name} — {dm.title} ({dm.source}){tag}")
+                print(f"      [{dm.confidence}] {dm.name} — {dm.title} ({dm.source}){tag}")
                 if dm.linkedin:
                     print(f"              {dm.linkedin}")
-        valid = sum(1 for dm in makers if dm.linkedin)
-        print(f"\n    Total: {len(makers)} decision makers ({valid} valid, {len(makers) - valid} invalid)")
+        high = sum(1 for dm in makers if dm.confidence == "High")
+        med = sum(1 for dm in makers if dm.confidence == "Medium")
+        print(f"\n    Total: {len(makers)} decision makers ({high} high, {med} medium confidence)")
     else:
         print("    No decision makers found.")
 
     # -- Save to CSV --
     _append_results(output_path, url, job_board, job.title, job.company_name,
-                    domain or "", makers)
+                    domain or "", makers,
+                    contact_phone=job.contact_phone or "",
+                    contact_email=job.contact_email or "")
 
     # -- Push to Clay --
     if clay_jobs_url:
         print("  CLAY: Pushing job offer…")
-        valid_count = sum(1 for dm in makers if dm.linkedin) if makers else 0
+        high_count = sum(1 for dm in makers if dm.confidence == "High") if makers else 0
         job_data = {
             "Job URL": url,
             "Job Board": job_board,
@@ -460,8 +476,10 @@ def process_one_url(
             "Company Name": job.company_name,
             "Company Website": domain or "",
             "Contact in Posting": job.contact_name or "",
+            "Contact Phone": job.contact_phone or "",
+            "Contact Email": job.contact_email or "",
             "Decision Makers Found": len(makers) if makers else 0,
-            "Valid Contacts": valid_count,
+            "High Confidence Contacts": high_count,
         }
         if _push_to_clay(clay_jobs_url, job_data, session):
             clay_counts["jobs"] = 1
@@ -479,9 +497,11 @@ def process_one_url(
                 "Decision Maker Title": dm.title,
                 "Category": dm.category,
                 "LinkedIn": dm.linkedin or "",
-                "Status": "Valid" if dm.linkedin else "Invalid",
+                "Confidence": dm.confidence,
                 "Source": dm.source,
                 "Mentioned in Job Posting": "Yes" if dm.mentioned_in_job_posting else "No",
+                "Contact Phone": job.contact_phone or "",
+                "Contact Email": job.contact_email or "",
                 "Job Board": job_board,
                 "Job URL": url,
             }
