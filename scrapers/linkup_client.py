@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from scrapers.config import MAX_RETRIES_PER_REQUEST
+from scrapers.config import MAX_RETRIES_PER_REQUEST, LINKUP_API_KEY
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,6 @@ def _post_with_retry(
 
 LINKUP_API_URL = "https://api.linkup.so/v1/search"
 LINKUP_FETCH_URL = "https://api.linkup.so/v1/fetch"
-LINKUP_API_KEY = "618ccb05-0186-4e66-9226-208943cd0126"
 
 # Domains to skip when looking for company websites
 SKIP_DOMAINS = {

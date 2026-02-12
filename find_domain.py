@@ -7,12 +7,16 @@ to find their official websites. Results are saved to a new CSV file.
 """
 
 import csv
+import os
 import time
 import logging
 import argparse
 from urllib.parse import urlparse
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -21,7 +25,7 @@ INPUT_CSV = "Scrapping job offer - thetruckersreport.com.csv"
 OUTPUT_CSV = "company_websites.csv"
 
 LINKUP_API_URL = "https://api.linkup.so/v1/search"
-LINKUP_API_KEY = "618ccb05-0186-4e66-9226-208943cd0126"
+LINKUP_API_KEY = os.getenv("LINKUP_API_KEY", "")
 
 # Domains to skip (aggregators / job boards, not company sites)
 SKIP_DOMAINS = {
@@ -172,7 +176,7 @@ def main() -> None:
     parser.add_argument(
         "--api-key",
         default=LINKUP_API_KEY,
-        help="Linkup API key (default: built-in key)",
+        help="Linkup API key (default: from .env file)",
     )
     parser.add_argument(
         "--delay",

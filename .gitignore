@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.env
 pipeline_results.csv
 test3.csv
 inbox/

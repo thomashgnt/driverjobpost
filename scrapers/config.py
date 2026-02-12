@@ -1,24 +1,29 @@
 """
 Pipeline Configuration
 ======================
-Edit this file to set your default Clay webhook URLs and other settings.
+Edit the .env file at the project root to set your API keys and webhook URLs.
+See .env.example for the required variables.
 """
 
 from __future__ import annotations
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ---------------------------------------------------------------------------
-# Clay webhook URLs (set once, never type again)
+# API keys
 # ---------------------------------------------------------------------------
 
-CLAY_JOBS_WEBHOOK = (
-    "https://api.clay.com/v3/sources/webhook/"
-    "pull-in-data-from-a-webhook-3ff2d610-a4b3-4729-97e2-396f7cf4622e"
-)
+LINKUP_API_KEY = os.getenv("LINKUP_API_KEY", "")
 
-CLAY_CONTACTS_WEBHOOK = (
-    "https://api.clay.com/v3/sources/webhook/"
-    "pull-in-data-from-a-webhook-931030cf-46b9-472e-9423-d5a4139b9e99"
-)
+# ---------------------------------------------------------------------------
+# Clay webhook URLs
+# ---------------------------------------------------------------------------
+
+CLAY_JOBS_WEBHOOK = os.getenv("CLAY_JOBS_WEBHOOK", "")
+CLAY_CONTACTS_WEBHOOK = os.getenv("CLAY_CONTACTS_WEBHOOK", "")
 
 # Set to False to disable Clay push (CSV-only mode)
 CLAY_ENABLED = True
