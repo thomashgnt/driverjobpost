@@ -60,7 +60,9 @@ from scrapers.find_linkedin import find_linkedin_url
 from scrapers.config import (
     CLAY_JOBS_WEBHOOK, CLAY_CONTACTS_WEBHOOK, CLAY_ENABLED,
     DELAY_BETWEEN_URLS, OUTPUT_CSV as DEFAULT_OUTPUT_CSV, WATCH_FOLDER,
+    MAX_CONSECUTIVE_FAILURES, CIRCUIT_BREAKER_PAUSE, RATE_LIMIT_LONG_PAUSE,
 )
+from scrapers.linkup_client import RateLimitExhausted
 
 logging.basicConfig(
     level=logging.INFO,
@@ -521,7 +523,13 @@ def run_batch(
     delay: float,
     resume: bool = False,
 ) -> None:
-    """Process a list of (url, csv_title) pairs through the full pipeline."""
+    """Process a list of (url, csv_title) pairs through the full pipeline.
+
+    Guard rails for large batches:
+    - Retry: if a URL fails, retry once after 30s
+    - Circuit breaker: if N URLs fail in a row, pause before continuing
+    - Rate limit: if Linkup returns 429 too many times, long pause then resume
+    """
     if resume:
         already_done = _load_already_done(output_path)
         before = len(urls)
@@ -543,30 +551,73 @@ def run_batch(
     session = requests.Session()
     total_clay_jobs = 0
     total_clay_contacts = 0
+    total_errors = 0
+    total_retried = 0
+    consecutive_failures = 0
 
     for i, (url, csv_title) in enumerate(urls, start=1):
         print(f"\n{'=' * 60}")
         print(f"  [{i}/{total}] {url}")
         print(f"{'=' * 60}")
 
-        try:
-            counts = process_one_url(
-                url, session, output_path,
-                clay_jobs_url=clay_jobs_url,
-                clay_contacts_url=clay_contacts_url,
-                csv_title=csv_title,
-            )
-            total_clay_jobs += counts["jobs"]
-            total_clay_contacts += counts["contacts"]
-        except Exception as exc:
-            log.error("Failed to process %s: %s", url, exc)
-            print(f"  ERROR: {exc} — skipping to next URL")
+        success = False
+        for attempt in range(2):  # max 2 attempts (original + 1 retry)
+            try:
+                counts = process_one_url(
+                    url, session, output_path,
+                    clay_jobs_url=clay_jobs_url,
+                    clay_contacts_url=clay_contacts_url,
+                    csv_title=csv_title,
+                )
+                total_clay_jobs += counts["jobs"]
+                total_clay_contacts += counts["contacts"]
+                success = True
+                consecutive_failures = 0
+                break
+
+            except RateLimitExhausted:
+                log.warning(
+                    "Rate limit exhausted. Pausing %ds before retrying…",
+                    RATE_LIMIT_LONG_PAUSE,
+                )
+                print(f"  RATE LIMITED — pausing {RATE_LIMIT_LONG_PAUSE // 60} minutes…")
+                time.sleep(RATE_LIMIT_LONG_PAUSE)
+                # Reset the global 429 counter so we can try again
+                import scrapers.linkup_client as _lc
+                _lc._consecutive_429s = 0
+                # This counts as attempt 0 retry, loop will try once more
+
+            except Exception as exc:
+                if attempt == 0:
+                    total_retried += 1
+                    log.warning("Failed [%s]. Retrying in 30s… (%s)", url, exc)
+                    print(f"  RETRY in 30s… ({exc})")
+                    time.sleep(30)
+                else:
+                    total_errors += 1
+                    log.error("Failed after retry [%s]: %s", url, exc)
+                    print(f"  ERROR: {exc} — skipping")
+
+        if not success:
+            consecutive_failures += 1
+            # Circuit breaker: too many failures in a row → pause
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                log.warning(
+                    "Circuit breaker: %d failures in a row. Pausing %ds…",
+                    consecutive_failures, CIRCUIT_BREAKER_PAUSE,
+                )
+                print(f"\n  CIRCUIT BREAKER — {consecutive_failures} failures in a row. "
+                      f"Pausing {CIRCUIT_BREAKER_PAUSE}s…")
+                time.sleep(CIRCUIT_BREAKER_PAUSE)
+                consecutive_failures = 0
 
         if i < total:
             time.sleep(delay)
 
     print(f"\n{'=' * 60}")
     print(f"  DONE! {total} URL(s) processed.")
+    if total_errors or total_retried:
+        print(f"  Errors: {total_errors} failed, {total_retried} retried")
     print(f"  Results saved to: {output_path}")
     if clay_on:
         print(f"  Clay: {total_clay_jobs} jobs + {total_clay_contacts} contacts pushed")

@@ -35,3 +35,17 @@ OUTPUT_CSV = "pipeline_results.csv"
 
 # Folder to watch for new CSV files (used by --watch mode)
 WATCH_FOLDER = "inbox"
+
+# ---------------------------------------------------------------------------
+# Rate limiting & retry (guard rails for large batch runs)
+# ---------------------------------------------------------------------------
+
+# Retries per Linkup API call (backoff: 2s, 4s, 8s…)
+MAX_RETRIES_PER_REQUEST = 3
+
+# If N URLs fail in a row, pause before continuing
+MAX_CONSECUTIVE_FAILURES = 3
+CIRCUIT_BREAKER_PAUSE = 60        # seconds
+
+# If Linkup returns 429 repeatedly, long pause
+RATE_LIMIT_LONG_PAUSE = 300       # 5 minutes
