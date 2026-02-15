@@ -409,7 +409,7 @@ def _company_in_result(company_name: str, result_text: str, person_name: str) ->
     not just someone whose personal name matches the company name.
 
     Removes the person's name parts from the result text, then checks
-    if the company name still appears.
+    if the company name still appears (exact match OR word-based match).
     """
     text = result_text.lower()
     company_lower = company_name.lower().strip()
@@ -422,15 +422,30 @@ def _company_in_result(company_name: str, result_text: str, person_name: str) ->
     # Clean up extra spaces
     text = re.sub(r'\s+', ' ', text)
 
-    # Check if full company name still appears
+    # --- Check 1: exact match ---
     if company_lower in text:
         return True
 
-    # Also try without punctuation (e.g. "D.M. Bowman" → "dm bowman")
+    # --- Check 2: without punctuation (e.g. "D.M. Bowman" → "dm bowman") ---
     company_clean = re.sub(r'[^\w\s]', '', company_lower)
     text_clean = re.sub(r'[^\w\s]', '', text)
     if company_clean in text_clean:
         return True
+
+    # --- Check 3: word-based match ---
+    # For names like "24 Seven Express Inc", the LinkedIn profile might say
+    # "24/7 Express" or "24Seven Express". Check if most meaningful words match.
+    from scrapers.find_domain import _clean_company_name
+    clean_name = _clean_company_name(company_name).lower()
+    # Extract meaningful words (skip very short words and numbers-only)
+    skip = {"the", "and", "of", "a", "an", "for", "in", "at", "by", "to"}
+    company_words = [w for w in clean_name.split()
+                     if len(w) > 2 and w not in skip]
+    if company_words:
+        found = sum(1 for w in company_words if w in text_clean)
+        # Require at least half of the meaningful words to appear
+        if found >= max(1, len(company_words) * 0.5):
+            return True
 
     return False
 
