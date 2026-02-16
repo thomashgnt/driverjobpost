@@ -27,7 +27,7 @@ Config: edit scrapers/config.py to change Clay webhook URLs and defaults.
 Pipeline steps for each URL:
   1. Scrape the job posting (title, company, description, contact)
   2. Find the company's official website
-  3. Find decision makers (5-priority deep search)
+  3. Find decision makers (3 parallel persona scrapers)
   4. Find LinkedIn profiles (skip if already found in step 3)
   5. Save everything to a CSV + push to Clay
 """
@@ -413,8 +413,8 @@ def process_one_url(
     domain = find_company_domain(job.company_name, session=session)
     print(f"    Website   : {domain or 'NOT FOUND'}")
 
-    # -- Step 3: Find decision makers (5-priority deep search) --
-    print("  STEP 3: Finding decision makers (deep search)…")
+    # -- Step 3: Find decision makers (3 parallel persona scrapers) --
+    print("  STEP 3: Finding decision makers (parallel search)…")
     makers = find_decision_makers(
         company_name=job.company_name,
         company_domain=domain,
