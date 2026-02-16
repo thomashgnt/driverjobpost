@@ -383,16 +383,14 @@ def process_one_url(
     print("\n  STEP 1: Scraping job posting…")
     job = scrape_job(url, session=session)
 
-    # Override company if Linkup gave a bad result but CSV has the real one
-    if csv_job:
-        linkup_co = job.company_name.lower()
-        if (linkup_co in ("unknown company", "unknown", "")
-                or "amazon" in linkup_co):
+    # Always trust the CSV company name when available
+    if csv_job and csv_job.company_name:
+        if job.company_name.lower() != csv_job.company_name.lower():
             log.info("Using CSV company '%s' (Linkup gave '%s')",
                      csv_job.company_name, job.company_name)
-            job.company_name = csv_job.company_name
-            if not job.title or job.title.lower() in ("unknown", "unknown title"):
-                job.title = csv_job.title
+        job.company_name = csv_job.company_name
+        if not job.title or job.title.lower() in ("unknown", "unknown title"):
+            job.title = csv_job.title
 
     print(f"    Job Board : {job_board}")
     print(f"    Job Title : {job.title}")
