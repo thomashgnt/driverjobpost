@@ -408,7 +408,7 @@ def process_one_url(
 
     # -- Step 2: Find company website --
     print("  STEP 2: Finding company website…")
-    domain = find_company_domain(job.company_name, session=session)
+    domain = find_company_domain(job.company_name, job_description=job.description, session=session)
     print(f"    Website   : {domain or 'NOT FOUND'}")
 
     # -- Step 3: Find decision makers (3 parallel persona scrapers) --
