@@ -421,6 +421,7 @@ def process_one_url(
         contact_email=job.contact_email,
         session=session,
     )
+    print(f"    → {len(makers)} decision makers found")
 
     # -- Step 4: Find LinkedIn profiles (skip if already found) --
     if makers:
@@ -486,7 +487,7 @@ def process_one_url(
             print("    Failed to push job offer to Clay")
 
     if clay_contacts_url and makers:
-        print("  CLAY: Pushing contacts…")
+        print(f"  CLAY: Pushing {len(makers)} contacts…")
         for dm in makers:
             contact_data = {
                 "Company Name": job.company_name,
@@ -503,9 +504,17 @@ def process_one_url(
                 "Job Board": job_board,
                 "Job URL": url,
             }
-            if _push_to_clay(clay_contacts_url, contact_data, session):
+            ok = _push_to_clay(clay_contacts_url, contact_data, session)
+            if ok:
                 clay_counts["contacts"] += 1
+                print(f"    ✓ {dm.name} pushed")
+            else:
+                print(f"    ✗ {dm.name} FAILED")
         print(f"    {clay_counts['contacts']}/{len(makers)} contacts pushed to Clay")
+    elif makers and not clay_contacts_url:
+        print(f"  CLAY: Skipping {len(makers)} contacts (no contacts webhook)")
+    elif not makers:
+        print("  CLAY: No contacts to push (0 decision makers found)")
 
     return clay_counts
 

@@ -28,6 +28,7 @@ from scrapers.pipeline import (
     process_one_url,
     _ensure_csv_header,
     _load_already_done,
+    _push_to_clay,
     CSV_FIELDS,
 )
 from scrapers.config import (
@@ -207,7 +208,7 @@ if launch:
 
 
 # =========================================================================
-# Results table
+# Results table + Push to Clay
 # =========================================================================
 st.divider()
 st.header("Results")
@@ -231,17 +232,94 @@ if os.path.exists(OUTPUT_CSV):
         if selected_conf != "All":
             filtered = filtered[filtered["Confidence"] == selected_conf]
 
-        st.dataframe(filtered, use_container_width=True, hide_index=True)
+        # Add a "Push" checkbox column for selection
+        filtered = filtered.reset_index(drop=True)
+        filtered.insert(0, "Push", False)
+
+        edited_df = st.data_editor(
+            filtered,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Push": st.column_config.CheckboxColumn(
+                    "Push",
+                    help="Select contacts to push to Clay",
+                    default=False,
+                ),
+                "LinkedIn": st.column_config.LinkColumn("LinkedIn"),
+            },
+            disabled=[c for c in filtered.columns if c != "Push"],
+        )
+
         st.caption(f"Showing {len(filtered)} of {len(df)} rows")
 
-        # Download
-        csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
-        )
+        # ---- Action buttons ----
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+
+        with btn_col1:
+            push_selected = st.button("Push selected to Clay", type="primary")
+
+        with btn_col2:
+            push_all_filtered = st.button("Push all filtered to Clay")
+
+        with btn_col3:
+            csv_bytes = filtered.drop(columns=["Push"]).to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download CSV",
+                data=csv_bytes,
+                file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+            )
+
+        # ---- Push logic ----
+        def _do_push(rows_to_push: pd.DataFrame):
+            """Push selected rows to Clay contacts webhook."""
+            if not CLAY_CONTACTS_WEBHOOK:
+                st.error("Clay contacts webhook not configured.")
+                return
+
+            session = requests.Session()
+            total = len(rows_to_push)
+            success = 0
+            progress_push = st.progress(0, text="Pushing to Clay...")
+
+            for i, (_, row) in enumerate(rows_to_push.iterrows()):
+                contact_data = {
+                    "Company Name": str(row.get("Company Name", "")),
+                    "Company Website": str(row.get("Company Website", "")),
+                    "Decision Maker Name": str(row.get("Decision Maker Name", "")),
+                    "Decision Maker Title": str(row.get("Decision Maker Title", "")),
+                    "Category": str(row.get("Category", "")),
+                    "LinkedIn": str(row.get("LinkedIn", "")),
+                    "Confidence": str(row.get("Confidence", "")),
+                    "Source": str(row.get("Source", "")),
+                    "Mentioned in Job Posting": str(row.get("Mentioned in Job Posting", "No")),
+                    "Contact Phone": str(row.get("Contact Phone", "")),
+                    "Contact Email": str(row.get("Contact Email", "")),
+                    "Job Board": str(row.get("Job Board", "")),
+                    "Job URL": str(row.get("Job URL", "")),
+                }
+                ok = _push_to_clay(CLAY_CONTACTS_WEBHOOK, contact_data, session)
+                if ok:
+                    success += 1
+                progress_push.progress((i + 1) / total,
+                                       text=f"Pushing {i + 1}/{total}...")
+
+            progress_push.empty()
+            if success == total:
+                st.success(f"{success}/{total} contacts pushed to Clay!")
+            else:
+                st.warning(f"{success}/{total} contacts pushed ({total - success} failed)")
+
+        if push_selected:
+            selected_rows = edited_df[edited_df["Push"] == True]  # noqa: E712
+            if selected_rows.empty:
+                st.warning("No contacts selected. Check the boxes in the 'Push' column.")
+            else:
+                _do_push(selected_rows)
+
+        if push_all_filtered:
+            _do_push(edited_df)
 
         # Summary metrics
         st.subheader("Summary")
