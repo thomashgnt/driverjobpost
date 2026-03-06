@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.streamlit/secrets.toml
 pipeline_results.csv
 test3.csv
 inbox/

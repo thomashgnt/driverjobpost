@@ -10,6 +10,15 @@ from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
+# Bridge: inject Streamlit secrets into os.environ (for Streamlit Cloud)
+try:
+    import streamlit as st
+    for key, value in st.secrets.items():
+        if isinstance(value, str):
+            os.environ.setdefault(key, value)
+except Exception:
+    pass  # Not running in Streamlit — use .env file instead
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
