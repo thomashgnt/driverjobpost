@@ -272,6 +272,12 @@ if os.path.exists(OUTPUT_CSV):
             )
 
         # ---- Push logic ----
+        def _safe_str(val) -> str:
+            """Convert a pandas cell to clean string (NaN → '')."""
+            if pd.isna(val):
+                return ""
+            return str(val).strip()
+
         def _do_push(rows_to_push: pd.DataFrame):
             """Push selected rows to Clay contacts webhook."""
             if not CLAY_CONTACTS_WEBHOOK:
@@ -281,27 +287,33 @@ if os.path.exists(OUTPUT_CSV):
             session = requests.Session()
             total = len(rows_to_push)
             success = 0
+            errors = []
             progress_push = st.progress(0, text="Pushing to Clay...")
 
             for i, (_, row) in enumerate(rows_to_push.iterrows()):
+                name = _safe_str(row.get("Decision Maker Name"))
                 contact_data = {
-                    "Company Name": str(row.get("Company Name", "")),
-                    "Company Website": str(row.get("Company Website", "")),
-                    "Decision Maker Name": str(row.get("Decision Maker Name", "")),
-                    "Decision Maker Title": str(row.get("Decision Maker Title", "")),
-                    "Category": str(row.get("Category", "")),
-                    "LinkedIn": str(row.get("LinkedIn", "")),
-                    "Confidence": str(row.get("Confidence", "")),
-                    "Source": str(row.get("Source", "")),
-                    "Mentioned in Job Posting": str(row.get("Mentioned in Job Posting", "No")),
-                    "Contact Phone": str(row.get("Contact Phone", "")),
-                    "Contact Email": str(row.get("Contact Email", "")),
-                    "Job Board": str(row.get("Job Board", "")),
-                    "Job URL": str(row.get("Job URL", "")),
+                    "Company Name": _safe_str(row.get("Company Name")),
+                    "Company Website": _safe_str(row.get("Company Website")),
+                    "Decision Maker Name": name,
+                    "Decision Maker Title": _safe_str(row.get("Decision Maker Title")),
+                    "Category": _safe_str(row.get("Category")),
+                    "LinkedIn": _safe_str(row.get("LinkedIn")),
+                    "Confidence": _safe_str(row.get("Confidence")),
+                    "Source": _safe_str(row.get("Source")),
+                    "Mentioned in Job Posting": _safe_str(row.get("Mentioned in Job Posting")) or "No",
+                    "Contact Phone": _safe_str(row.get("Contact Phone")),
+                    "Contact Email": _safe_str(row.get("Contact Email")),
+                    "Job Board": _safe_str(row.get("Job Board")),
+                    "Job URL": _safe_str(row.get("Job URL")),
                 }
-                ok = _push_to_clay(CLAY_CONTACTS_WEBHOOK, contact_data, session)
-                if ok:
+                try:
+                    resp = session.post(CLAY_CONTACTS_WEBHOOK, json=contact_data, timeout=15)
+                    resp.raise_for_status()
                     success += 1
+                except Exception as exc:
+                    errors.append(f"{name}: {exc}")
+
                 progress_push.progress((i + 1) / total,
                                        text=f"Pushing {i + 1}/{total}...")
 
@@ -310,6 +322,8 @@ if os.path.exists(OUTPUT_CSV):
                 st.success(f"{success}/{total} contacts pushed to Clay!")
             else:
                 st.warning(f"{success}/{total} contacts pushed ({total - success} failed)")
+                for err in errors:
+                    st.error(err)
 
         if push_selected:
             selected_rows = edited_df[edited_df["Push"] == True]  # noqa: E712
